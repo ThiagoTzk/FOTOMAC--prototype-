@@ -1,0 +1,3 @@
+Faça o sistema FOTOMAC, o levantamento de requisitos estão nesta pasta ( /Users/thiagojosenunes/FOTOMAC (prototype)/Requisitos FotoMac - v1.6.docx ) caso não consiga ler o arquivo, transforme ele em XML usando sua skill e continue a produção, e leve em consideraçao em todo o sistema a LGPD, o design das telas está no figma (https://www.figma.com/design/aSJlyk6F5HLypl3ijCl17C/FOTOMAC--Copy-?m=auto&t=gp1o6UNieYlHAf0o-6), lembre que por agora não iremos fazer o MOBILE, apenas o WEB por agora. Utilize o reconhecimento facial INSIGHT FACE que usamos no teste do fotomac.
+
+Tecnologias e ferramentas estão no levantamento de requisitos: usaremos REAC NATIVE + EXPO (mobile, por agora não fazer) + SEAWEED FS (ainda nao implemente nada, irei estudar como fazer)

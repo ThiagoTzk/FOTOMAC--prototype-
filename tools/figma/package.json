@@ -1,0 +1,8 @@
+{
+  "name": "fotomac-figma-offline",
+  "private": true,
+  "description": "Reads the downloaded .fig file offline (Figma MCP quota on the Starter plan is limited).",
+  "type": "module",
+  "scripts": { "decode": "node decode.mjs" },
+  "dependencies": { "kiwi-schema": "^0.5.0" }
+}

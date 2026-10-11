@@ -1,0 +1,34 @@
+# Secrets
+.env
+infra/seaweedfs/s3.json
+
+# Personal data: photos, logs, local storage (LGPD — never versioned)
+infra/seaweedfs/data/
+infra/seaweedfs/*.log
+infra/seaweedfs/*.pid
+# Local photo samples used for manual tests (may contain faces)
+backend/samples/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Node / Expo
+node_modules/
+.expo/
+dist/
+
+# Design source
+*.fig
+
+# Development e-mails (contain addresses and single-use links)
+backend/outbox/
+
+# Browser-test screenshots (may show faces from real photos and e-mail addresses)
+frontend/e2e-screenshots/
+e2e-screenshots/
+
+# macOS
+.DS_Store
