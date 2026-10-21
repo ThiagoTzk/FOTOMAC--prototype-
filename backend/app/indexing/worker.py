@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
@@ -18,8 +19,9 @@ from app import audit, parameters
 from app.db.models import (Event, EventStatus, FaceEmbedding, Image, ImageIndexingStatus,
                            ImageReviewStatus)
 from app.db.models import VisitorSession as VisitorSessionModel
-from app.face.port import FaceEngine
+from app.face.port import FaceEngine, FaceEngineUnavailable
 from app.imaging import decode_image
+from app.institutional import service as institutional
 from app.storage.port import ObjectStorage
 
 log = logging.getLogger("fotomac.worker")
@@ -54,6 +56,8 @@ def index_next(db: Session, storage: ObjectStorage, engine: FaceEngine) -> bool:
         image.faces_count = len(faces)
         image.indexing_status = ImageIndexingStatus.PROCESSED if faces else ImageIndexingStatus.NO_FACES
         image.indexed_at, image.indexing_model_version, image.last_error = _now(), engine.model_version, None
+        db.flush()
+        institutional.mark_image(db, image, engine.model_version)   # RF021 note 3: every new photo
     except Exception as exc:  # one bad file never stops the queue (RNF09)
         db.rollback()
         image = db.get(Image, image.id)
@@ -96,12 +100,18 @@ def delete_due_removals(db: Session, storage: ObjectStorage, sender=None) -> int
 
 class Worker:
     """Runs the queue in a daemon thread inside the API process (enough for the prototype).
-    For production it can run as its own process: `python -m app.indexing.worker`."""
+    For production it can run as its own process: `python -m app.indexing.worker`.
 
-    def __init__(self, session_factory: sessionmaker, storage: ObjectStorage, engine: FaceEngine,
-                 idle_seconds: float = 1.0):
-        self._sessions, self._storage, self._engine = session_factory, storage, engine
+    The engine is asked for on every round (`engine_for(db)` = the one chosen in the panel), so a
+    swap made by the administrator is followed without restarting. If it cannot be loaded, the
+    facial queues simply WAIT — no attempt is spent, no image is marked as failed — while
+    packages, expiry and removals keep running (safe failure)."""
+
+    def __init__(self, session_factory: sessionmaker, storage: ObjectStorage,
+                 engine_for: Callable[[Session], FaceEngine], idle_seconds: float = 1.0):
+        self._sessions, self._storage, self._engine_for = session_factory, storage, engine_for
         self._idle = idle_seconds
+        self._engine_problem: str | None = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="fotomac-worker", daemon=True)
 
@@ -113,6 +123,9 @@ class Worker:
         self._thread.join(timeout=10)
 
     def _run(self) -> None:
+        from app.accounts import service as accounts
+        from app.calibration import service as calibration
+        from app.events import deletion
         from app.events.expiry import expire_due, notify_expiring
         from app.indexing.reindex import reindex_next
         from app.notifications.factory import get_email_sender
@@ -121,34 +134,64 @@ class Worker:
         while not self._stop.is_set():
             busy = False
             try:
-                with self._sessions() as db:
-                    busy = index_next(db, self._storage, self._engine)
+                engine = self._engine()
+                if engine:
+                    with self._sessions() as db:
+                        busy = index_next(db, self._storage, engine)
                 with self._sessions() as db:
                     busy = build_next(db, self._storage) or busy
-                if not busy:  # RF028 note 2: re-indexing only when publication has nothing waiting
+                if engine and not busy:  # RF028 note 2: re-indexing only when publication has nothing waiting
                     with self._sessions() as db:
-                        busy = reindex_next(db, self._storage, self._engine)
+                        busy = reindex_next(db, self._storage, engine)
+                if engine and not busy:  # RF021: (re)search the collection for a person who authorized
+                    with self._sessions() as db:
+                        busy = institutional.refresh_next(db, self._storage, engine)
+                if not busy:  # the panel's quality test: last in line, a few photos per round
+                    with self._sessions() as db:
+                        busy = calibration.run_next(db, self._storage)
                 if time.monotonic() - last_cleanup > 60:
                     with self._sessions() as db:
                         expire_packages(db, self._storage)
                     with self._sessions() as db:
                         delete_due_removals(db, self._storage)
+                    with self._sessions() as db:  # LGPD Art. 6, III: no forgotten test keeps a person's photo
+                        calibration.close_stale(db, self._storage)
                     with self._sessions() as db:  # RF006 / RNF12: retention
                         notify_expiring(db, get_email_sender())
                     with self._sessions() as db:
                         expire_due(db, self._storage, get_email_sender())
+                    with self._sessions() as db:  # "Excluir evento": eliminated when the grace period ends
+                        deletion.delete_due(db, self._storage, get_email_sender())
+                    with self._sessions() as db:  # RF031: temporary accounts end after 24 h (never deleted)
+                        accounts.expire_contractors(db)
+                    with self._sessions() as db:  # RF031 note 7: CPF and birth date only while needed
+                        accounts.erase_contractor_identities(db)
+                    with self._sessions() as db:  # RF020: a registration nobody signed does not stay
+                        institutional.expire_pending(db, self._storage)
                     last_cleanup = time.monotonic()
             except Exception:
                 log.exception("worker loop error")
             if not busy:
                 self._stop.wait(self._idle)
 
+    def _engine(self) -> FaceEngine | None:
+        try:
+            with self._sessions() as db:
+                engine = self._engine_for(db)
+        except FaceEngineUnavailable as exc:
+            if str(exc) != self._engine_problem:  # logged once per problem, not every second
+                log.error("face engine unavailable, facial queues waiting: %s", exc)
+                self._engine_problem = str(exc)
+            return None
+        self._engine_problem = None
+        return engine
+
 
 if __name__ == "__main__":  # standalone process
     from app.db.session import get_engine
-    from app.face.factory import get_face_engine
+    from app.face.factory import active_engine
     from app.storage.factory import get_storage
     logging.basicConfig(level=logging.INFO)
-    w = Worker(sessionmaker(bind=get_engine()), get_storage(), get_face_engine())
+    w = Worker(sessionmaker(bind=get_engine()), get_storage(), active_engine)
     w.start()
     w._thread.join()

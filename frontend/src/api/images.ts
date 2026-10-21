@@ -20,9 +20,20 @@ export type ImageItem = {
   can_manage: boolean;
   removal_deadline: string | null;
   version: string;
+  /** Photos of a hired photographer: 'pending' until the administrator approves them (RF031). */
+  approval: 'pending' | 'approved' | null;
+  uploaded_by_name: string;          // who sent it (accountability)
+  approved_by_name: string | null;   // who reviewed and approved it (RF031)
+  approved_at: string | null;
+  /** Sent as PNG, WebP, HEIC or RAW: the original is kept beside its JPEG copy (RF007 note 13). */
+  source_format: string | null;
+  /** Individual download in the panel, without watermark: author, responsible, admin, marketing (RF030). */
+  can_download: boolean;
+  /** "Pessoa institucional localizada" (RF021): only on the single-image route. */
+  institutional?: string[];
 };
 
-export type ImageCounts = Record<'all' | 'mine' | 'in_review' | 'discarded' | 'published' | 'no_faces' | 'failed' | 'removal', number>;
+export type ImageCounts = Record<'all' | 'mine' | 'in_review' | 'discarded' | 'published' | 'no_faces' | 'failed' | 'removal' | 'pending_approval' | 'ready', number>;
 export type ImageFilter = keyof ImageCounts;
 
 export type Processing = {
@@ -33,7 +44,17 @@ export type Processing = {
 export type PackageJob = {
   id: string; status: 'pending' | 'running' | 'ready' | 'failed' | 'expired'; file_name: string;
   image_count: number; size_bytes: number; progress: number; only_own: boolean;
+  /** Marketing's package of someone else's event: the JPEG copies, for publicity (RF030). */
+  publicity: boolean;
 };
+
+export type PackageEstimate = { images: number; size_bytes: number; only_own: boolean; publicity: boolean; other_formats: number };
+
+/** What the upload screen accepts right now (RF007); RAW depends on the administrator (RF026). */
+export type UploadRules = {
+  formats: string[]; max_photo_bytes: number; raw_enabled: boolean; raw_extensions: string[]; max_raw_bytes: number | null;
+};
+export const getUploadRules = () => api<UploadRules>('/upload-rules');
 
 export function listImages(eventId: string, filter: ImageFilter = 'all') {
   const mine = filter === 'mine';
@@ -42,12 +63,16 @@ export function listImages(eventId: string, filter: ImageFilter = 'all') {
 }
 
 export const getImage = (id: string) => api<ImageItem>(`/images/${id}`);
+/** A link signed for this login session; the JPEG then comes through the API, without watermark. */
+export const imageDownloadLink = (id: string) => api<{ url: string }>(`/images/${id}/download-link`, { method: 'POST' });
 export const discardImage = (id: string) => api<ImageItem>(`/images/${id}/discard`, { method: 'POST' });
 export const restoreImage = (id: string) => api<ImageItem>(`/images/${id}/restore`, { method: 'POST' });
 export const deleteImage = (id: string) => api<void>(`/images/${id}`, { method: 'DELETE' });
 export const reprocessImage = (id: string) => api<ImageItem>(`/images/${id}/reprocess`, { method: 'POST' });
-export const publishEvent = (eventId: string) =>
-  api<{ sent: number; discarded: number; published: number }>(`/events/${eventId}/publish`, { method: 'POST' });
+/** Publishes every image ready for publication, or only `ids` (the ones selected in the Images tab). */
+export const publishEvent = (eventId: string, ids?: string[]) =>
+  api<{ sent: number; discarded: number; published: number }>(`/events/${eventId}/publish`,
+                                                               { method: 'POST', body: ids ? { ids } : undefined });
 export const getProcessing = (eventId: string) => api<Processing>(`/events/${eventId}/processing`);
 
 /** Reduced copies for the screens; the original stays in the storage untouched. */
@@ -68,3 +93,13 @@ export function formatDateTime(iso: string): string {
 }
 
 export const formatDate = (iso: string) => formatDateTime(iso).slice(0, 10);
+
+/** Administrator: approve a hired photographer's photo (it may then be published) or reject it —
+ *  a rejected photo is deleted without ever producing a biometric vector (RF031 note 3). */
+export const decideApproval = (id: string, approve: boolean) =>
+  api<{ image: ImageItem | null }>(`/images/${id}/approval`, { body: { approve } });
+
+/** Administrator: approve or reject at once the selected photos of a hired photographer (RF031).
+ *  Each approved photo keeps who approved it and when. */
+export const decideApprovals = (eventId: string, imageIds: string[], approve: boolean) =>
+  api<{ decided: number }>(`/events/${eventId}/images/approval`, { body: { image_ids: imageIds, approve } });

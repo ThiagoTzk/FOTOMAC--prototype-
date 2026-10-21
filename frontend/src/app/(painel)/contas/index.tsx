@@ -15,10 +15,13 @@ const STATUS_OPTIONS: { value: AccountStatus; label: string }[] = [
   { value: 'active', label: 'Ativa' },
   { value: 'inactive', label: 'Inativa' },
   { value: 'suspended', label: 'Suspensa' },
+  { value: 'expired', label: 'Expirada' },
 ];
 const ROLE_OPTIONS: { value: Role; label: string }[] = [
   { value: 'admin', label: 'Administrador' },
   { value: 'photographer', label: 'Fotógrafo' },
+  { value: 'marketing', label: 'Marketing' },
+  { value: 'contractor', label: 'Fotógrafo contratado' },
 ];
 
 /**

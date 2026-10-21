@@ -20,6 +20,7 @@ from app.db.models import (Account, Event, FaceEmbedding, Image, ImageIndexingSt
 from app.events.service import EventError
 from app.face.port import FaceEngine
 from app.imaging import decode_image
+from app.institutional import service as institutional
 from app.storage.port import ObjectStorage
 
 MAX_ATTEMPTS = 3
@@ -33,6 +34,17 @@ def model_versions(db: Session) -> list[str]:
     stored = set(db.scalars(select(FaceEmbedding.model_version).distinct()))
     stored |= {v for v in db.scalars(select(Image.indexing_model_version).distinct()) if v}
     return sorted(stored)
+
+
+def outdated_count(db: Session, version: str | None) -> int:
+    """Published photos whose vectors are NOT of the engine in use — the search does not find them
+    until they are re-indexed. Shown in the panel so the administrator never misses it."""
+    if version is None:
+        return 0
+    return db.scalar(select(func.count()).select_from(Image).where(
+        Image.review_status == ImageReviewStatus.PUBLISHED, Image.removal_requested_at.is_(None),
+        Image.indexing_status.in_([ImageIndexingStatus.PROCESSED, ImageIndexingStatus.NO_FACES]),
+        Image.indexing_model_version != version)) or 0
 
 
 def request(db: Session, admin: Account, engine: FaceEngine, scope: ReindexScope,
@@ -71,7 +83,8 @@ def reindex_next(db: Session, storage: ObjectStorage, engine: FaceEngine) -> boo
     if item is None:
         return False
     image = db.get(Image, item.image_id)
-    if image is None or image.review_status != ImageReviewStatus.PUBLISHED or image.removal_requested_at:
+    if (image is None or image.review_status != ImageReviewStatus.PUBLISHED or image.removal_requested_at
+            or image.event.deletion_due_at):  # an event being deleted never gets its vectors back
         item.status = "skipped"  # deleted, or on its way out, since the request
         db.commit()
         _finish(db, item.job_id)
@@ -91,6 +104,8 @@ def reindex_next(db: Session, storage: ObjectStorage, engine: FaceEngine) -> boo
         image.faces_count = len(faces)
         image.indexing_status = ImageIndexingStatus.PROCESSED if faces else ImageIndexingStatus.NO_FACES
         image.indexed_at, image.indexing_model_version, image.last_error = _now(), engine.model_version, None
+        db.flush()
+        institutional.mark_image(db, image, engine.model_version)   # RF021: the new vectors are compared too
         item.status = "done"
     except Exception as exc:  # one bad file never stops the queue
         db.rollback()

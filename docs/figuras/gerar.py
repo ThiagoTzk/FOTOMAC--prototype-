@@ -13,6 +13,7 @@ OUT = Path(__file__).resolve().parent
 FONT = "Helvetica, Arial, sans-serif"
 
 INK, MUTED, LINE = "#1E293B", "#64748B", "#94A3B8"
+LIMIAR = 0.3741  # similarity threshold calibrated for YuNet + SFace (fotomac-lab, Test 1)
 C = {  # one colour per part of the system, the same in every figure
     "site": ("#334155", "#F1F5F9"),
     "api": ("#1D4ED8", "#DBEAFE"),
@@ -103,7 +104,7 @@ def arquitetura():
     b.append(text(185, 352, "app/db/", 12, color=MUTED))
     # dependencies
     b.append(box(40, 470, 250, 110, "db", "PostgreSQL 17 + pgvector", ["o “fichário”: contas, eventos,", "situações e vetores de rosto", "porta 5432"], title_size=15.5, line_size=12.5))
-    b.append(box(325, 470, 250, 110, "ai", "InsightFace buffalo_l", ["o “olho”: acha rostos e", "gera os vetores", "biblioteca DENTRO da API"], title_size=15.5, line_size=12.5, dashed=True))
+    b.append(box(325, 470, 250, 110, "ai", "YuNet + SFace (OpenCV)", ["o “olho”: acha rostos e", "gera os vetores", "biblioteca DENTRO da API"], title_size=15.5, line_size=12.5, dashed=True))
     b.append(box(610, 470, 250, 110, "s3", "SeaweedFS", ["o “almoxarifado”: fotos,", "miniaturas, capas, ZIPs", "protocolo S3 · porta 8333"], title_size=15.5, line_size=12.5))
     b.append(arrow([(185, 362), (165, 468)], "SQL", 152, 420, anchor="end"))
     b.append(arrow([(400, 362), (450, 468)], "chamada de função", 436, 420, anchor="end"))
@@ -123,7 +124,10 @@ def linha_do_tempo():
         ("04/10", "Correções suas", "Resultado some ao sair; download e ZIP presos à sessão.", "half"),
         ("04/10", "Etapa 4a — contas", "Administrador cria, edita, suspende e desbloqueia contas.", "api"),
         ("04/10", "Etapa 4b — configuração", "Temas, parâmetros do reconhecimento, reindexação, expiração.", "api"),
-        ("próximo", "4c · 4d · calibragem", "Remoções e registros (admin), pessoas institucionais, métricas.", "todo"),
+        ("15–16/10", "Pós 1ª banca", "CESMAC escolhe YuNet + SFace (licença sem custo); troca pelo painel.", "ai"),
+        ("16–17/10", "Requisitos 2.0", "Teste de precisão, temas do fotógrafo, borrão de criança, novos perfis.", "half"),
+        ("17/10", "Produção v2.0", "Captura guiada com prova de vida, marketing, contratado, exclusão, sino.", "api"),
+        ("próximo", "Fases 9 a 13", "Pessoas institucionais, vídeo, marca d'água, aplicativo, implantação.", "todo"),
     ]
     b, y0, gap = [], 30, 62
     b.append(f'<line x1="150" y1="{y0}" x2="150" y2="{y0 + gap * (len(items) - 1)}" stroke="{LINE}" stroke-width="3"/>')
@@ -141,17 +145,16 @@ def linha_do_tempo():
 # ---------------------------------------------------------------- 3. status per phase
 
 def situacao():
-    phases = [
-        ("Fase 1 — Administração e acervo", [
-            ("Contas por convite", "ok"), ("Login e perfis", "ok"), ("Eventos", "ok"), ("Envio em lote", "ok"),
-            ("Conferência", "ok"), ("Publicação", "ok"), ("Indexação facial", "ok"), ("Colaboração", "ok"),
-            ("Temas", "ok")]),
-        ("Fase 2 — Acesso público", [
-            ("Lista e filtros", "ok"), ("Galeria privada", "ok"), ("Aviso “Estou ciente”", "ok"),
-            ("Busca pelo rosto", "ok"), ("Visualização + crédito", "ok"), ("Download c/ créditos", "ok")]),
-        ("Fase 3 — Conformidade e apoio", [
-            ("Remoção em 72 h", "half"), ("Expiração automática", "ok"), ("Parâmetros", "ok"), ("Reindexação", "ok"),
-            ("Registros e uso atípico", "half"), ("Pessoas institucionais", "todo"), ("Calibragem do limiar", "todo")]),
+    phases = [  # requirements v2.0, section 9 (17/10/2026)
+        ("Fases 1 a 4 — acervo, acesso público, visual e novo reconhecimento", [
+            ("Contas e perfis", "ok"), ("Eventos e envio", "ok"), ("Conferência e publicação", "ok"),
+            ("Busca pelo rosto", "ok"), ("Leiaute de computador", "ok"), ("YuNet + SFace", "ok"), ("Troca de modelo", "ok")]),
+        ("Fases 5 a 8 — calibração, temas, contas e prova de vida", [
+            ("Teste de precisão", "ok"), ("Temas com ícone", "ok"), ("Crianças: aguarda resposta", "todo"),
+            ("Marketing", "ok"), ("Fotógrafo contratado", "ok"), ("Excluir evento", "ok"), ("Captura guiada", "ok")]),
+        ("Fases 9 a 13 — conformidade, vídeo, aplicativo, formatos e fechamento", [
+            ("Remoção em 72 h", "ok"), ("Pessoas institucionais", "ok"), ("Uso atípico e relatório", "half"),
+            ("Vídeo", "todo"), ("Aplicativo móvel", "todo"), ("Formatos e marca d'água", "ok"), ("Tutorial", "todo")]),
     ]
     b, y = [], 20
     for title, chips in phases:
@@ -183,11 +186,11 @@ def adaptadores():
     b = []
     for col, (x, kind_port, port, port_line, adapters, cfg) in enumerate([
         (20, "api", "FaceEngine", "detect(imagem) → rostos + vetores",
-         [("InsightFaceEngine", "em uso hoje · buffalo_l", "ai", False), ("OutroModeloEngine", "um arquivo novo, no futuro", "todo", True)],
-         "FOTOMAC_FACE_ENGINE=insightface"),
+         [("SFaceEngine", "em uso hoje · YuNet + SFace", "ai", False), ("OutroModeloEngine", "um arquivo novo, no futuro", "todo", True)],
+         ("quem escolhe o modelo:", "o administrador, no painel")),
         (470, "api", "ObjectStorage", "put · get · stream · delete",
          [("S3ObjectStorage", "SeaweedFS (protocolo S3)", "s3", False), ("Outro armazenamento", "se o CESMAC trocar", "todo", True)],
-         "FOTOMAC_S3_ENDPOINT=…"),
+         ("escolhido no backend/.env:", "FOTOMAC_S3_ENDPOINT=…")),
     ]):
         b.append(box(x + 60, 20, 290, 66, "site", "Regras do sistema", ["busca, indexação, envio…"], title_size=15, line_size=13))
         b.append(arrow([(x + 205, 86), (x + 205, 122)], "só conhece a porta", x + 215, 110, size=12.5, anchor="start"))
@@ -198,8 +201,8 @@ def adaptadores():
             ax = x + 20 + i * 190
             b.append(arrow([(x + 205, 194), (ax + 85, 250)], dashed=dashed))
             b.append(box(ax, 252, 172, 74, kind, name, [line], title_size=13.5, line_size=12, dashed=dashed))
-        b.append(text(x + 205, 360, "escolhido no backend/.env:", 13, color=MUTED))
-        b.append(text(x + 205, 380, cfg, 13.5, "bold", color=INK))
+        b.append(text(x + 205, 360, cfg[0], 13, color=MUTED))
+        b.append(text(x + 205, 380, cfg[1], 13.5, "bold", color=INK))
     b.append(f'<line x1="450" y1="20" x2="450" y2="385" stroke="{LINE}" stroke-dasharray="3 5"/>')
     svg("04-adaptadores.svg", 900, 400, b)
 
@@ -208,11 +211,11 @@ def adaptadores():
 
 def reconhecimento():
     steps = [
-        ("site", "1. Foto", ["JPEG do evento", "ou a selfie"]),
-        ("ai", "2. Detecção", ["SCRFD", "det_10g.onnx", "caixa + confiança"]),
+        ("site", "1. Imagem", ["foto do evento", "ou quadro da captura"]),
+        ("ai", "2. Detecção", ["YuNet", "foto ≤ 1920 px", "caixa + confiança"]),
         ("ai", "3. Alinhamento", ["recorte 112×112", "olhos no lugar", "(5 pontos)"]),
-        ("ai", "4. Reconhecimento", ["ArcFace ResNet-50", "w600k_r50.onnx"]),
-        ("db", "5. Vetor", ["512 números", "normalizado"]),
+        ("ai", "4. Reconhecimento", ["SFace", "(OpenCV)"]),
+        ("db", "5. Vetor", ["128 números", "normalizado"]),
     ]
     b, w, gap = [], 152, 25
     for i, (kind, title, lines) in enumerate(steps):
@@ -222,7 +225,7 @@ def reconhecimento():
             b.append(arrow([(x + w, 80), (x + w + gap - 1, 80)]))
     # two paths
     b.append(box(110, 200, 330, 96, "db", "Foto publicada do evento", ["vetor GUARDADO no PostgreSQL", "(tabela face_embeddings)", "uma linha por rosto da foto"], title_size=15, line_size=12.5))
-    b.append(box(480, 200, 330, 96, "bad", "Selfie do visitante", ["vetor só na MEMÓRIA, comparado", "e descartado no fim da busca", "nunca vai para disco ou banco"], title_size=15, line_size=12.5))
+    b.append(box(480, 200, 330, 96, "bad", "Captura do visitante", ["vetores só na MEMÓRIA, comparados", "e descartados no fim da busca", "nunca vão para disco ou banco"], title_size=15, line_size=12.5))
     cx = 10 + 4 * (w + gap) + w / 2  # centre of "5. Vetor"
     b.append(arrow([(cx, 140), (cx, 165), (275, 165), (275, 198)]))
     b.append(arrow([(cx, 165), (645, 165), (645, 198)]))
@@ -251,17 +254,17 @@ def similaridade():
     # scale
     x0, x1, y = 60, 840, 270
     sx = lambda v: x0 + (x1 - x0) * v
-    b.append(f'<rect x="{x0}" y="{y - 14}" width="{sx(0.30) - x0}" height="28" fill="{C["bad"][1]}" stroke="{C["bad"][0]}"/>')
-    b.append(f'<rect x="{sx(0.30)}" y="{y - 14}" width="{x1 - sx(0.30)}" height="28" fill="{C["ok"][1]}" stroke="{C["ok"][0]}"/>')
-    b.append(text((x0 + sx(0.30)) / 2, y + 5, "não mostra", 13.5, "bold", color=C["bad"][0]))
-    b.append(text((sx(0.30) + x1) / 2, y + 5, "mostra ao visitante", 13.5, "bold", color=C["ok"][0]))
+    b.append(f'<rect x="{x0}" y="{y - 14}" width="{sx(LIMIAR) - x0}" height="28" fill="{C["bad"][1]}" stroke="{C["bad"][0]}"/>')
+    b.append(f'<rect x="{sx(LIMIAR)}" y="{y - 14}" width="{x1 - sx(LIMIAR)}" height="28" fill="{C["ok"][1]}" stroke="{C["ok"][0]}"/>')
+    b.append(text((x0 + sx(LIMIAR)) / 2, y + 5, "não mostra", 13.5, "bold", color=C["bad"][0]))
+    b.append(text((sx(LIMIAR) + x1) / 2, y + 5, "mostra ao visitante", 13.5, "bold", color=C["ok"][0]))
     for v in [0, 0.2, 0.4, 0.6, 0.8]:
         b.append(f'<line x1="{sx(v)}" y1="{y + 14}" x2="{sx(v)}" y2="{y + 22}" stroke="{INK}"/>')
         b.append(text(sx(v), y + 38, f"{v:.1f}".replace(".", ","), 12.5, color=MUTED))
-    marks = [(0.2783, "0,278: a foto ERRADA com nota", "mais alta no Teste 1", C["bad"][0], -1),
-             (0.30, "0,30: limiar", "(padrão de fábrica)", C["api"][0], 1),
-             (0.56, "0,56: mesma pessoa,", "foto desfocada (teste)", C["ok"][0], 1),
-             (0.99, "0,99: mesma foto", "recortada", C["ok"][0], 1)]
+    marks = [(0.3985, "0,3985: a foto ERRADA com nota mais", "alta no Teste 1 (o 1 erro: precisão de 98%)", C["bad"][0], -1),
+             (LIMIAR, "0,3741: limiar", "(calibrado no Teste 1)", C["api"][0], 1),
+             (0.53, "0,53: mesma pessoa,", "foto desfocada (teste)", C["ok"][0], 1),
+             (0.98, "0,98: mesma foto", "recortada", C["ok"][0], 1)]
     for v, l1, l2, color, side in marks:
         x = sx(v)
         if side < 0:
@@ -269,12 +272,12 @@ def similaridade():
             b.append(text(x - 6, y - 64, l1, 12.5, "bold", anchor="end", color=color))
             b.append(text(x - 6, y - 48, l2, 12.5, anchor="end", color=color))
         else:
-            ty = y + 62 if v != 0.30 else y + 62
+            ty = y + 62
             anchor = "end" if v > 0.9 else "start" if v > 0.4 else "middle"
             b.append(f'<line x1="{x}" y1="{y + 14}" x2="{x}" y2="{ty - 14}" stroke="{color}" stroke-width="2"/>')
             b.append(text(x, ty, l1, 12.5, "bold", anchor=anchor, color=color))
             b.append(text(x, ty + 16, l2, 12.5, anchor=anchor, color=color))
-    b.append(f'<line x1="{sx(0.30)}" y1="{y - 24}" x2="{sx(0.30)}" y2="{y + 24}" stroke="{C["api"][0]}" stroke-width="4"/>')
+    b.append(f'<line x1="{sx(LIMIAR)}" y1="{y - 24}" x2="{sx(LIMIAR)}" y2="{y + 24}" stroke="{C["api"][0]}" stroke-width="4"/>')
     svg("06-similaridade.svg", 900, 370, b)
 
 
@@ -336,33 +339,37 @@ def estados():
 # ---------------------------------------------------------------- 9. visitor search sequence
 
 def sequencia_busca():
-    lanes = [("Navegador", "site"), ("API Python", "api"), ("InsightFace", "ai"), ("PostgreSQL", "db"), ("SeaweedFS", "s3")]
+    lanes = [("Navegador", "site"), ("API Python", "api"), ("YuNet + SFace", "ai"), ("PostgreSQL", "db"), ("SeaweedFS", "s3")]
     xs = [80, 340, 520, 680, 830]
     b = []
     for (name, kind), x in zip(lanes, xs):
         b.append(box(x - 65, 10, 130, 40, kind, name, title_size=14))
-        b.append(f'<line x1="{x}" y1="50" x2="{x}" y2="790" stroke="{LINE}" stroke-dasharray="4 4"/>')
-    msgs = [  # (from, to, y, label, dashed)
+        b.append(f'<line x1="{x}" y1="50" x2="{x}" y2="850" stroke="{LINE}" stroke-dasharray="4 4"/>')
+    msgs = [  # (from, to, y, label, dashed) — guided capture with liveness (v2.0, RF036)
         (0, 1, 90, "1. “Estou ciente” (POST /consent)", False),
-        (1, 3, 120, "registra a ciência + sessão anônima", False),
-        (1, 0, 150, "cookie da sessão (HttpOnly)", True),
-        (0, 1, 200, "2. selfie em JPEG (POST /search)", False),
-        (1, 2, 235, "3. detect(selfie)", False),
-        (2, 1, 265, "rostos + vetores (512)", True),
-        (1, 1, 300, "4. escolhe UM rosto: o maior", False),
-        (1, 3, 345, "5. vetores do evento com similaridade ≥ 0,30", False),
-        (3, 1, 375, "ids das fotos, da mais parecida à menos", True),
-        (1, 1, 410, "6. apaga selfie e vetor da memória", False),
-        (1, 3, 440, "guarda só os ids na sessão", False),
-        (1, 0, 470, "lista de resultados", True),
-        (0, 1, 525, "7. miniatura (GET /images/{id}/thumb)", False),
-        (1, 1, 555, "confere: o id está NESTA sessão?", False),
-        (1, 4, 590, "busca o arquivo", False),
-        (4, 1, 620, "bytes da miniatura", True),
-        (1, 0, 650, "imagem (sem cache)", True),
-        (0, 1, 700, "8. Baixar → link assinado, 15 min", False),
-        (1, 4, 735, "arquivo original com créditos", False),
-        (1, 0, 765, "download", True),
+        (1, 3, 118, "registra a ciência + sessão anônima", False),
+        (1, 0, 146, "cookie da sessão (HttpOnly)", True),
+        (0, 1, 190, "2. pede a ordem (POST /capture)", False),
+        (1, 1, 216, "sorteia a ordem dos 4 movimentos", False),
+        (1, 0, 244, "ordem sorteada (vale 1 vez, 2 min)", True),
+        (0, 1, 290, "3. quadros da captura (POST /search)", False),
+        (1, 2, 320, "4. detect(cada quadro)", False),
+        (2, 1, 348, "rostos, pontos e vetores", True),
+        (1, 1, 380, "5. prova de vida: giros na ordem?", False),
+        (1, 1, 410, "mesma pessoa em todas as poses?", False),
+        (1, 3, 450, "6. vetores do evento ≥ 0,3741 (melhor pose)", False),
+        (3, 1, 478, "ids das fotos, da mais parecida à menos", True),
+        (1, 1, 510, "7. apaga quadros e vetores da memória", False),
+        (1, 3, 538, "guarda só os ids na sessão", False),
+        (1, 0, 566, "lista de resultados", True),
+        (0, 1, 612, "8. miniatura (GET /images/{id}/thumb)", False),
+        (1, 1, 640, "confere: o id está NESTA sessão?", False),
+        (1, 4, 670, "busca o arquivo", False),
+        (4, 1, 698, "bytes da miniatura", True),
+        (1, 0, 726, "imagem (sem cache)", True),
+        (0, 1, 770, "9. Baixar → link assinado, 15 min", False),
+        (1, 4, 800, "arquivo original com créditos", False),
+        (1, 0, 830, "download", True),
     ]
     for a, c, y, label, dashed in msgs:
         if a == c:  # self call
@@ -374,7 +381,7 @@ def sequencia_busca():
         b.append(arrow([(x1, y), (x2 + (-4 if x2 > x1 else 4), y)], dashed=dashed))
         mid = (x1 + x2) / 2
         b.append(globals()["label"](mid, y - 7, label))
-    svg("09-sequencia-busca.svg", 900, 800, b)
+    svg("09-sequencia-busca.svg", 900, 860, b)
 
 
 # ---------------------------------------------------------------- 10. database
@@ -393,10 +400,10 @@ def banco():
         return h
     w = 180
     table(20, 20, "themes", ["nome", "ativo / inativo", "(Esporte, Saúde…)"], w=w)
-    table(250, 20, "events", ["nome, datas, local", "situação", "data de expiração"], w=w)
-    table(480, 20, "images", ["chaves no SeaweedFS", "situações", "crédito, SHA-256"], w=w)
-    table(710, 20, "face_embeddings", ["vetor (512 números)", "versão do modelo", "caixa do rosto"], kind="ai", w=w)
-    table(20, 170, "accounts", ["e-mail, nome", "perfil, situação", "hash da senha"], w=w)
+    table(250, 20, "events", ["nome, datas, local", "situação", "data de expiração", "exclusão agendada"], w=w)
+    table(480, 20, "images", ["chaves no SeaweedFS", "situações", "crédito, SHA-256", "quem enviou / aprovou"], w=w)
+    table(710, 20, "face_embeddings", ["vetor (128 números)", "versão do modelo", "caixa do rosto"], kind="ai", w=w)
+    table(20, 170, "accounts", ["e-mail, nome", "perfil, situação", "hash da senha", "CPF cifrado (contratado)"], w=w)
     table(250, 170, "visitor_sessions", ["sem nome, sem e-mail", "ids do resultado"], w=w)
     table(480, 170, "removal_requests", ["foto, motivo", "contato (apagado ao fim)"], w=w)
     table(710, 170, "system_parameters", ["limiar, retenção…", "quem mudou e quando"], w=w)
@@ -422,7 +429,7 @@ def banco():
     b.append(text(450, 442, "audit_log — o registro de tudo o que aconteceu, INALTERÁVEL", 14.5, "bold", color=C["bad"][0]))
     b.append(text(450, 460, "um gatilho no próprio banco recusa qualquer UPDATE ou DELETE nesta tabela", 12.5))
     b.append(text(20, 494, "Outras tabelas de apoio: password_tokens (links de ativação e recuperação), package_jobs (ZIPs), "
-                  "reindex_jobs e reindex_items.", 12.5, anchor="start", color=MUTED, italic=True))
+                  "reindex_jobs e reindex_items, recognition_tests (teste de precisão).", 12.5, anchor="start", color=MUTED, italic=True))
     svg("10-banco.svg", 900, 505, b)
 
 

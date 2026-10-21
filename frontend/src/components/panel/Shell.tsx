@@ -1,13 +1,13 @@
 import { router, usePathname, type Href } from 'expo-router';
 import {
-  Bell, CalendarDays, ChevronDown, CircleUserRound, LayoutDashboard, LogOut, Menu, ScanFace, Tags, Users, X, type LucideIcon,
+  CalendarDays, ChevronDown, CircleUserRound, IdCard, LayoutDashboard, LogOut, Menu, ScanFace, Tags, Users, X, type LucideIcon,
 } from 'lucide-react-native';
-import { useEffect, useState, type ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 
-import { api } from '@/api/client';
 import { useAuth } from '@/auth/AuthContext';
 import { Brand } from '@/components/panel/Brand';
+import { NotificationBell } from '@/components/panel/NotificationBell';
 import { fonts, panel } from '@/theme/tokens';
 
 type NavEntry = { href: Href; label: string; icon: LucideIcon; match: string };
@@ -17,6 +17,10 @@ const NAV: NavEntry[] = [
   { href: '/eventos', label: 'Eventos', icon: CalendarDays, match: '/eventos' },
 ];
 
+/** Figma (photographer menu): the consultation of institutional people (RF021) — never for the hired
+ *  photographer's temporary account (note 1). The API refuses it too. */
+const INSTITUTIONAL_NAV: NavEntry = { href: '/pessoas-institucionais', label: 'Pessoas institucionais', icon: IdCard, match: '/pessoas-institucionais' };
+
 /** Administrator-only items (the Figma has no admin screens; same layout as the rest).
  *  Hiding them is only for the interface — the API refuses non-admins (RF002 note 4). */
 const ADMIN_NAV: NavEntry[] = [
@@ -24,6 +28,11 @@ const ADMIN_NAV: NavEntry[] = [
   { href: '/temas', label: 'Temas', icon: Tags, match: '/temas' },
   { href: '/reconhecimento', label: 'Reconhecimento facial', icon: ScanFace, match: '/reconhecimento' },
 ];
+
+const AREA: Record<string, string> = {
+  admin: 'ÁREA DO ADMINISTRADOR', photographer: 'ÁREA DO FOTÓGRAFO', marketing: 'ÁREA DA EQUIPE DE MARKETING',
+  contractor: 'ÁREA DO FOTÓGRAFO CONTRATADO',
+};
 
 /** Below this width the sidebar becomes a drawer (RNF08: phones and tablets too). */
 const WIDE = 1024;
@@ -49,7 +58,8 @@ function NavItem({ href, label, icon: Icon, active, onPress }: { href: Href; lab
 function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
   const { account, logout } = useAuth();
-  const items = account?.role === 'admin' ? [...NAV, ...ADMIN_NAV] : NAV;
+  const items = account?.role === 'admin' ? [...NAV, INSTITUTIONAL_NAV, ...ADMIN_NAV]
+    : account?.role === 'contractor' ? NAV : [...NAV, INSTITUTIONAL_NAV];
   return (
     <View style={styles.sidebar}>
       <View style={{ gap: 30 }}>
@@ -78,16 +88,9 @@ function Header({ onMenu }: { onMenu?: () => void }) {
   // Narrow screens (onMenu present): only the initials, so the header never overflows.
   const compact = !!onMenu;
   const [menu, setMenu] = useState(false);
-  const [attention, setAttention] = useState(0);
-  const pathname = usePathname();
-
-  // The bell only shows the dot when something real needs attention (no decorative alert).
-  useEffect(() => {
-    api<{ attention: number }>('/dashboard').then((d) => setAttention(d.attention)).catch(() => undefined);
-  }, [pathname]);
 
   if (!account) return null;
-  const role = account.role === 'admin' ? 'Administrador' : 'Fotógrafo';
+  const role = account.role_label;
   return (
     <View style={[styles.header, compact && { paddingHorizontal: 16 }]}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
@@ -96,14 +99,10 @@ function Header({ onMenu }: { onMenu?: () => void }) {
             <Menu size={18} color={panel.navText} strokeWidth={1.6} absoluteStrokeWidth />
           </Pressable>
         )}
-        {!compact && <Text style={styles.context}>{account.role === 'admin' ? 'ÁREA DO ADMINISTRADOR' : 'ÁREA DO FOTÓGRAFO'}</Text>}
+        {!compact && <Text style={styles.context}>{AREA[account.role]}</Text>}
       </View>
       <View style={styles.account}>
-        <Pressable accessibilityRole="button" accessibilityLabel={attention ? `${attention} itens requerem atenção` : 'Sem pendências'}
-                   onPress={() => router.navigate('/painel')} style={styles.round}>
-          <Bell size={18} color={panel.navText} strokeWidth={1.6} absoluteStrokeWidth />
-          {attention > 0 && <View style={styles.dot} />}
-        </Pressable>
+        <NotificationBell onOpen={() => setMenu(false)} />
         <Pressable accessibilityRole="button" accessibilityLabel="Menu da conta" accessibilityState={{ expanded: menu }}
                    onPress={() => setMenu((m) => !m)} style={{ flexDirection: 'row', alignItems: 'center', gap: 16 }}>
           {/* Initials instead of the profile photo of the design: a photo has no purpose in
@@ -179,8 +178,6 @@ const styles = StyleSheet.create({
   context: { fontFamily: fonts.regular, fontSize: 12, color: panel.muted },
   account: { flexDirection: 'row', alignItems: 'center', gap: 16 },
   round: { width: 38, height: 38, borderRadius: 999, backgroundColor: panel.page, alignItems: 'center', justifyContent: 'center' },
-  dot: { position: 'absolute', top: 8, right: 9, width: 7, height: 7, borderRadius: 999, backgroundColor: panel.notificationDot,
-         borderWidth: 1, borderColor: '#FFFFFF' },
   avatar: { width: 38, height: 38, borderRadius: 999, backgroundColor: panel.primarySoft, alignItems: 'center', justifyContent: 'center' },
   avatarText: { fontFamily: fonts.bold, fontSize: 14, color: panel.primaryText },
   name: { fontFamily: fonts.bold, fontSize: 14, color: panel.text, maxWidth: 160 },

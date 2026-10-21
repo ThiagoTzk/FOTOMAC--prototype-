@@ -3,14 +3,25 @@ import type { LucideIcon } from 'lucide-react-native';
 import { CircleAlert, X } from 'lucide-react-native';
 import type { ReactNode } from 'react';
 import {
-  ActivityIndicator, Modal as RNModal, Pressable, ScrollView, StyleSheet, Text, View, type StyleProp, type ViewStyle,
+  ActivityIndicator, Modal as RNModal, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View, type StyleProp,
+  type ViewStyle,
 } from 'react-native';
 
 import { poppins, visitor } from '@/theme/tokens';
 
-/** Centred content column: the Figma screens are 402 px wide with 32 px side margins. */
-export function Column({ children, style }: { children: ReactNode; style?: StyleProp<ViewStyle> }) {
-  return <View style={[styles.column, style]}>{children}</View>;
+/**
+ * Centred content column: the Figma screens are 402 px wide with 32 px side margins. On a
+ * computer it widens (visitor.columnWide); `narrow` keeps reading pages at a comfortable line length.
+ */
+export function Column({ children, style, narrow }: { children: ReactNode; style?: StyleProp<ViewStyle>; narrow?: boolean }) {
+  const { width } = useWindowDimensions();
+  const maxWidth = !narrow && width >= visitor.wideFrom ? visitor.columnWide : visitor.column;
+  return <View style={[styles.column, { maxWidth }, style]}>{children}</View>;
+}
+
+/** True on a computer-sized window (the visitor area switches from phone layout to web layout). */
+export function useWide() {
+  return useWindowDimensions().width >= visitor.wideFrom;
 }
 
 type ButtonProps = {
@@ -84,14 +95,15 @@ export function Note({ children, tone = 'info', icon: Icon = CircleAlert }: { ch
 
 /**
  * RF022 note 1: shown permanently on the event page and with the results. Says the photos are
- * only for the people in them and where to ask for a removal.
+ * only for the people in them and how to ask for a removal — from the photo itself, in the
+ * search result (the removal page by file was dropped on 16/10/2026: the search pins the exact image).
  */
 export function ResponsibleUse() {
   return (
     <Note>
       As fotos destinam-se exclusivamente às pessoas nelas retratadas. Compartilhar ou usar a imagem de outra pessoa
-      sem autorização é vedado pela legislação. Recebeu ou encontrou uma foto que não é sua?{' '}
-      <Text style={styles.inlineLink} accessibilityRole="link" onPress={() => router.push('/remocao')}>Solicite a remoção</Text>.
+      sem autorização é vedado pela legislação. Quer retirar uma foto em que você aparece? Abra a foto no resultado da
+      busca e toque em “Solicitar remoção”.
     </Note>
   );
 }
@@ -129,7 +141,7 @@ export const vtext = StyleSheet.create({
 
 const styles = StyleSheet.create({
   backdrop: { position: 'fixed' as 'absolute', top: 0, left: 0, right: 0, bottom: 0, cursor: 'auto' } as object,
-  column: { width: '100%', maxWidth: visitor.column, alignSelf: 'center', paddingHorizontal: 32 },
+  column: { width: '100%', alignSelf: 'center', paddingHorizontal: 32 },
   button: { minHeight: 44, borderRadius: 12, paddingHorizontal: 16, paddingVertical: 9, flexDirection: 'row',
             alignItems: 'center', justifyContent: 'center', gap: 8 },
   primary: { backgroundColor: visitor.primary },

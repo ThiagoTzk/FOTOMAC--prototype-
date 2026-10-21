@@ -5,7 +5,7 @@ import { ActivityIndicator, Linking, Platform, StyleSheet, Text, View } from 're
 
 import { API_URL, api } from '@/api/client';
 import { getEvent, type EventItem } from '@/api/events';
-import { formatBytes, type PackageJob } from '@/api/images';
+import { formatBytes, type PackageEstimate, type PackageJob } from '@/api/images';
 import { PageHeader } from '@/components/panel/PageHeader';
 import { ProgressBar } from '@/components/panel/Progress';
 import { Button, Card, Notice, Pill } from '@/components/panel/ui';
@@ -35,13 +35,13 @@ function Step({ n, title, description, done, right, children }: {
 export default function DownloadScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const [event, setEvent] = useState<EventItem | null>(null);
-  const [estimate, setEstimate] = useState<{ images: number; size_bytes: number; only_own: boolean } | null>(null);
+  const [estimate, setEstimate] = useState<PackageEstimate | null>(null);
   const [job, setJob] = useState<PackageJob | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useFocusEffect(useCallback(() => {
     getEvent(id).then(setEvent).catch((e) => setError(e.message));
-    api<{ images: number; size_bytes: number; only_own: boolean }>(`/events/${id}/package/estimate`).then(setEstimate).catch(() => undefined);
+    api<PackageEstimate>(`/events/${id}/package/estimate`).then(setEstimate).catch(() => undefined);
   }, [id]));
 
   // Follow the background job until it is ready.
@@ -73,16 +73,23 @@ export default function DownloadScreen() {
   if (!event || !estimate) return error ? <Notice tone="danger" icon={TriangleAlert} title={error} /> : <Card><ActivityIndicator color={panel.primary} /></Card>;
   const preparing = job && (job.status === 'pending' || job.status === 'running');
   const ready = job?.status === 'ready';
+  // Three packages (RF012 note 2, RF030): the guard copy, an author's own photos, marketing's publicity copy.
+  const title = estimate.publicity ? 'Baixar para divulgação' : estimate.only_own ? 'Baixar minhas imagens' : 'Baixar acervo';
+  const subtitle = estimate.publicity
+    ? 'Prepare um pacote com as fotografias publicadas deste evento para a divulgação institucional.'
+    : estimate.only_own ? 'Prepare um pacote com as fotografias publicadas que você enviou a este evento.'
+      : 'Prepare um pacote com as fotografias publicadas deste evento.';
+  const contents = estimate.publicity
+    ? 'O pacote contém as fotografias em JPEG, sem marca d\'água, com o crédito do fotógrafo e o aviso de propriedade do CESMAC gravados no arquivo e sem dados de localização. As fotos com remoção pedida ficam de fora. O download fica registrado com a sua conta.'
+    : `O pacote contém os arquivos originais, sem recompressão e sem marca d'água, com os créditos gravados nos metadados e sem dados de localização${estimate.other_formats ? ` — ${estimate.other_formats} no formato em que foram enviados (HEIC, PNG, WebP ou RAW)` : ''}. As fotos com remoção pedida ficam de fora.`;
 
   return (
     <>
-      <PageHeader crumbs={[{ label: 'Eventos', href: '/eventos' }, { label: event.name, href: `/eventos/${id}` }, { label: 'Baixar acervo' }]}
-                  title={estimate.only_own ? 'Baixar minhas imagens' : 'Baixar acervo'}
-                  subtitle={estimate.only_own ? 'Prepare um pacote com as fotografias publicadas que você enviou a este evento.'
-                    : 'Prepare um pacote com as fotografias publicadas deste evento.'} />
+      <PageHeader crumbs={[{ label: 'Eventos', href: '/eventos' }, { label: event.name, href: `/eventos/${id}` }, { label: title }]}
+                  title={title} subtitle={subtitle} />
       <Card padding={22}>
         <View style={styles.summary}>
-          {[['Fotos publicadas', `${estimate.images} JPEG`], ['Tamanho estimado', formatBytes(estimate.size_bytes)], ['Evento', event.name]]
+          {[['Fotos publicadas', String(estimate.images)], ['Tamanho estimado', formatBytes(estimate.size_bytes)], ['Evento', event.name]]
             .map(([label, value]) => (
               <View key={label} style={styles.summaryItem}>
                 <Text style={styles.small}>{label}</Text>
@@ -90,9 +97,7 @@ export default function DownloadScreen() {
               </View>
             ))}
         </View>
-        <Text style={styles.text}>
-          O pacote contém as fotografias JPEG originais, sem recompressão, com os créditos gravados nos metadados e sem dados de localização.
-        </Text>
+        <Text style={styles.text}>{contents}</Text>
       </Card>
       {error && <Notice tone="danger" icon={TriangleAlert} title={error} />}
       <Step n={1} title="Preparar o pacote" description="Inicie a organização segura dos arquivos publicados." done={!!job}

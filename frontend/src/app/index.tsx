@@ -1,22 +1,82 @@
+import { router, useLocalSearchParams } from 'expo-router';
 import { ChevronRight } from 'lucide-react-native';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { router } from 'expo-router';
 
-import type { PublicFilters } from '@/api/public';
+import { getPrivacy, type PublicFilters } from '@/api/public';
 import { EventList, usePublicEvents } from '@/components/visitor/EventList';
 import { VisitorFilters } from '@/components/visitor/Filters';
 import { VisitorHeader } from '@/components/visitor/Header';
-import { Column, vtext } from '@/components/visitor/ui';
+import { Column, useWide, VButton, vtext } from '@/components/visitor/ui';
+import { EventGrid, Hero, HowItWorks, PrivacyBand, SectionTitle, ThemeStrip } from '@/components/visitor/web/Home';
+import { WebPage, Wrap } from '@/components/visitor/web/Site';
 import { poppins, visitor } from '@/theme/tokens';
 
 /**
- * Visitor home ("Home - Mobile" / "Home - busca"): public, no account (RF013). Lists ONLY
- * published events; no photo of the collection appears here except the event covers.
+ * Visitor home: public, no account (RF013). Lists ONLY published events; no photo of the
+ * collection appears here except the event covers. On a computer it is a web page
+ * (WebHome); on a phone, the Figma screen ("Home - Mobile" / "Home - busca").
  */
 export default function Home() {
+  return useWide() ? <WebHome /> : <MobileHome />;
+}
+
+const isFiltering = (f: PublicFilters) => !!(f.q?.trim() || f.theme_ids?.length || f.day || f.period_start);
+
+function WebHome() {
+  const { secao } = useLocalSearchParams<{ secao?: string }>();
   const [filters, setFilters] = useState<PublicFilters>({});
-  const filtering = !!(filters.q?.trim() || filters.theme_ids?.length || filters.day || filters.period_start);
+  const filtering = isFiltering(filters);
+  const { items, total, loading, error, more } = usePublicEvents(filters);
+  const [retention, setRetention] = useState<string | null>(null);
+  const scroll = useRef<ScrollView>(null);
+  const eventsY = useRef(0);
+  const howY = useRef(0);
+
+  // The retention actually practised, from the server (RF022 note 5) — never a fixed "6 meses".
+  useEffect(() => { getPrivacy().then((p) => setRetention(p.retention)).catch(() => undefined); }, []);
+  // "Como funciona" in the top bar points here.
+  useEffect(() => {
+    if (secao !== 'como-funciona') return;
+    const t = setTimeout(() => scroll.current?.scrollTo({ y: Math.max(0, howY.current - 24), animated: true }), 300);
+    return () => clearTimeout(t);
+  }, [secao]);
+  const toEvents = () => scroll.current?.scrollTo({ y: Math.max(0, eventsY.current - 16), animated: true });
+
+  return (
+    <WebPage scrollRef={scroll}>
+      <Hero filters={filters} onFilters={setFilters} onSearch={toEvents} onSeeAll={() => router.push('/explorar')} />
+      <ThemeStrip selected={filters.theme_ids ?? []} onSelect={(ids) => setFilters({ ...filters, theme_ids: ids, page: 1 })} />
+      <View onLayout={(e) => { eventsY.current = e.nativeEvent.layout.y; }}>
+        <Wrap style={{ paddingVertical: 56 }}>
+          <SectionTitle
+            title={filtering ? 'Resultado da busca' : 'Eventos recentes'}
+            sub={filtering ? (total === 1 ? '1 evento encontrado' : `${total} eventos encontrados`)
+              : retention ? `Fotos disponíveis por ${retention} após o evento.` : undefined}
+            right={(
+              <Pressable accessibilityRole="link" onPress={() => router.push('/explorar')} style={styles.seeAll}>
+                <Text style={styles.seeAllText}>Ver todos os eventos</Text>
+                <ChevronRight size={18} color={visitor.primary} strokeWidth={1.8} absoluteStrokeWidth />
+              </Pressable>
+            )} />
+          <EventGrid items={filtering ? items : items.slice(0, 8)} loading={loading} error={error}
+                     empty={filtering ? 'Nenhum evento encontrado com esses filtros.' : 'Ainda não há eventos publicados.'} />
+          <View style={{ alignItems: 'center', marginTop: 36 }}>
+            {filtering
+              ? more && <VButton label="Carregar mais eventos" onPress={more} loading={loading} />
+              : total > 8 && <VButton label="Ver mais eventos" onPress={() => router.push('/explorar')} />}
+          </View>
+        </Wrap>
+      </View>
+      <View onLayout={(e) => { howY.current = e.nativeEvent.layout.y; }}><HowItWorks /></View>
+      <PrivacyBand />
+    </WebPage>
+  );
+}
+
+function MobileHome() {
+  const [filters, setFilters] = useState<PublicFilters>({});
+  const filtering = isFiltering(filters);
   const { items, total, loading, error, more } = usePublicEvents(filters);
 
   return (
@@ -52,4 +112,5 @@ const styles = StyleSheet.create({
   titleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
   seeAll: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   count: { fontFamily: poppins.semiBold, fontSize: 14, color: visitor.primary },
+  seeAllText: { fontFamily: poppins.semiBold, fontSize: 15, color: visitor.primary },
 });

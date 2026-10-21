@@ -1,10 +1,15 @@
-"""Adapter: InsightFace (SCRFD detector + ArcFace vector, model pack buffalo_l).
+"""Adapter: InsightFace (SCRFD detector + ArcFace vector, model pack buffalo_l) — REFERENCE ONLY.
 
-This is the ONLY file in the system that imports `insightface`. It uses the library's
-official API with its factory parameters — the configuration that won fotomac-lab's
-Test 1 (score 97.6/100). No pre-processing of our own around it.
+It won fotomac-lab's Test 1 (97.6/100), but the buffalo_l models are licensed for non-commercial
+research only, and CESMAC chose YuNet + SFace (15/10/2026). So it exists here only as the yardstick
+of the precision test in the panel ("Teste de precisão"): the builder refuses to make it the engine
+in use (factory.ENGINES, reference_only). Its vectors are computed in memory during a test run and
+never stored. The ONLY file in the system that imports `insightface`; official API, factory
+parameters, no pre-processing of our own.
 """
 from __future__ import annotations
+
+from pathlib import Path
 
 import numpy as np
 
@@ -16,7 +21,8 @@ MODEL_PACK = "buffalo_l"
 class InsightFaceEngine:
     vector_dim = 512
 
-    def __init__(self, model_pack: str = MODEL_PACK, min_detection_score: float = 0.5):
+    def __init__(self, model_pack: str = MODEL_PACK, min_detection_score: float = 0.5, models_dir: Path | None = None):
+        # models_dir is the folder of the OpenCV models; InsightFace keeps its own (~/.insightface).
         # Imported here so the rest of the system (and other adapters) never load it.
         import insightface
         from insightface.app import FaceAnalysis
@@ -42,5 +48,6 @@ class InsightFaceEngine:
                 detection_score=float(face.det_score),
                 embedding=np.asarray(face.normed_embedding, dtype=np.float32),
                 detector_index=index,
+                landmarks=tuple((float(x), float(y)) for x, y in face.kps) if face.kps is not None else None,
             ))
         return faces

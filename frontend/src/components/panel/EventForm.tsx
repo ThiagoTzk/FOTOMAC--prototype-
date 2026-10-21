@@ -1,13 +1,16 @@
 import * as DocumentPicker from 'expo-document-picker';
 import { Image } from 'expo-image';
 import { router } from 'expo-router';
-import { Calendar, ImagePlus, Info, TriangleAlert } from 'lucide-react-native';
+import { Calendar, ImagePlus, Info, Plus, TriangleAlert } from 'lucide-react-native';
 import { useEffect, useState } from 'react';
-import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { api, ApiError } from '@/api/client';
-import { coverUrl, isoToBr, listThemes, type DatePrecision, type EventItem, type Theme } from '@/api/events';
+import { coverUrl, createEventTheme, isoToBr, listThemes, type DatePrecision, type EventItem, type Theme } from '@/api/events';
 import { useAuth } from '@/auth/AuthContext';
+import { ThemeIcon } from '@/components/icons/themeIcons';
+import { IconPicker } from '@/components/panel/IconPicker';
+import { Modal } from '@/components/panel/Modal';
 import { Select } from '@/components/panel/Select';
 import { Button, Card, Field, Input, Notice } from '@/components/panel/ui';
 import { fonts, panel } from '@/theme/tokens';
@@ -64,6 +67,8 @@ export function EventForm({ event }: { event?: EventItem }) {
   const [saving, setSaving] = useState(false);
   // The preview is stored with the dates that produced it, so a stale answer is never shown.
   const [preview, setPreview] = useState<{ key: string; expires_on: string } | null>(null);
+  // "+ Novo tema": the tags are the photographer's — created here, while filling in the event.
+  const [newTheme, setNewTheme] = useState<{ name: string; icon: string; error: string | null; saving: boolean } | null>(null);
 
   useEffect(() => { listThemes().then(setThemes).catch(() => undefined); }, []);
   // A theme the administrator inactivated is no longer offered — but an event that already has
@@ -72,6 +77,19 @@ export function EventForm({ event }: { event?: EventItem }) {
     ...themes.map((t) => ({ value: t.id, label: t.name })),
     ...(event?.themes ?? []).filter((t) => !themes.some((a) => a.id === t.id)).map((t) => ({ value: t.id, label: `${t.name} (inativo)` })),
   ];
+
+  async function saveTheme() {
+    if (!newTheme) return;
+    setNewTheme({ ...newTheme, saving: true, error: null });
+    try {
+      const theme = await createEventTheme(newTheme.name.trim(), newTheme.icon);
+      setThemes((list) => [...list, theme].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR')));
+      edit('themes', setThemeIds)([...themeIds, theme.id]);  // already chosen for this event
+      setNewTheme(null);
+    } catch (e) {
+      setNewTheme((n) => n && { ...n, saving: false, error: e instanceof ApiError ? e.message : 'Não foi possível criar o tema.' });
+    }
+  }
 
   /** Wraps a setter so the field's error disappears as soon as the person edits it. */
   const edit = <T,>(key: string, setter: (v: T) => void) => (v: T) => {
@@ -156,9 +174,14 @@ export function EventForm({ event }: { event?: EventItem }) {
                  invalid={!!errors.name} accessibilityLabel="Nome do evento" />
         </Field>
         <Field label="Temas" error={errors.themes} style={[styles.half, { zIndex: 30 }]}>
-          <Select multiple placeholder="Selecione um ou mais temas" accessibilityLabel="Temas"
-                  options={themeOptions} value={themeIds}
-                  onChange={edit('themes', setThemeIds)} invalid={!!errors.themes} />
+          <View style={{ flexDirection: 'row', gap: 8, alignItems: 'flex-start' }}>
+            <View style={{ flex: 1 }}>
+              <Select multiple placeholder="Selecione um ou mais temas" accessibilityLabel="Temas"
+                      options={themeOptions} value={themeIds}
+                      onChange={edit('themes', setThemeIds)} invalid={!!errors.themes} />
+            </View>
+            <Button variant="secondary" icon={Plus} label="Novo tema" onPress={() => setNewTheme({ name: '', icon: 'tag', error: null, saving: false })} />
+          </View>
         </Field>
       </View>
 
@@ -241,6 +264,30 @@ export function EventForm({ event }: { event?: EventItem }) {
         <Button variant="secondary" label="Cancelar" onPress={() => (router.canGoBack() ? router.back() : router.replace('/eventos'))} />
         <Button label={editing ? 'Salvar alterações' : 'Criar evento'} onPress={submit} loading={saving} />
       </View>
+      <Modal visible={!!newTheme} onClose={() => setNewTheme(null)} icon={Plus} title="Novo tema" width={720}>
+        {newTheme && (
+          <View style={{ gap: 16 }}>
+            <Text style={styles.help}>
+              O tema vira um filtro público para todos os eventos. Ele já entra selecionado neste evento.
+            </Text>
+            <View style={{ flexDirection: 'row', gap: 12, alignItems: 'flex-end' }}>
+              <View style={styles.themePreview}><ThemeIcon name={newTheme.icon} size={24} color={panel.primary} strokeWidth={1.7} absoluteStrokeWidth /></View>
+              <Field label="Nome do tema" error={newTheme.error ?? undefined} style={{ flex: 1 }}>
+                <Input value={newTheme.name} maxLength={50} placeholder="Ex.: Robótica" accessibilityLabel="Nome do novo tema"
+                       onChangeText={(t) => setNewTheme((n) => n && { ...n, name: t, error: null })} invalid={!!newTheme.error} />
+              </Field>
+            </View>
+            <Text style={styles.label}>Símbolo</Text>
+            <ScrollView style={{ maxHeight: 300 }}>
+              <IconPicker value={newTheme.icon} onChange={(icon) => setNewTheme((n) => n && { ...n, icon })} />
+            </ScrollView>
+            <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 10 }}>
+              <Button variant="secondary" label="Cancelar" onPress={() => setNewTheme(null)} />
+              <Button label="Criar tema" loading={newTheme.saving} disabled={newTheme.name.trim().length < 2} onPress={saveTheme} />
+            </View>
+          </View>
+        )}
+      </Modal>
     </Card>
   );
 }
@@ -250,6 +297,7 @@ const styles = StyleSheet.create({
   half: { flexGrow: 1, flexBasis: 300 },
   label: { fontFamily: fonts.bold, fontSize: 12, color: panel.text },
   help: { fontFamily: fonts.regular, fontSize: 12, lineHeight: 17, color: panel.muted },
+  themePreview: { width: 46, height: 46, borderRadius: 23, backgroundColor: panel.primarySoft, alignItems: 'center', justifyContent: 'center' },
   error: { fontFamily: fonts.regular, fontSize: 12, color: panel.danger },
   chip: { height: 26, borderRadius: 999, paddingHorizontal: 10, justifyContent: 'center' },
   chipText: { fontFamily: fonts.bold, fontSize: 12 },

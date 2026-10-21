@@ -1,5 +1,5 @@
 // End-to-end test of part 4b (administrator: themes RF027, parameters RF026, re-indexing RF028)
-// in a real browser against the real API and InsightFace. Leaves every parameter back at its
+// in a real browser against the real API and YuNet + SFace. Leaves every parameter back at its
 // value before the test.
 //
 //   node e2e/config.e2e.mjs <grupo.jpg> <capa.jpg> [screenshot-folder]
@@ -92,8 +92,8 @@ try {
 
   console.log('3. Parâmetros (RF026)');
   await page.goto(`${WEB}/reconhecimento`);
-  await text('Versão do modelo em uso').waitFor();
-  check(await text(/insightface/i).isVisible(), 'versão do modelo exibida (somente leitura)');
+  await text('Modelo de reconhecimento').first().waitFor();
+  check(await text(/yunet-2023mar\+sface-2021dec/).isVisible(), 'modelo em uso exibido (YuNet + SFace)');
   await shot('parametros');
   await field('Limiar de similaridade').fill('0,9');
   await text('Entre 0,20 e 0,80.').waitFor();
@@ -105,7 +105,7 @@ try {
   await shot('advertencia-limiar');
   await button('Entendi, salvar').click();
   await text(/1 parâmetro\(s\) alterado\(s\)/).waitFor();
-  await text(/Limiar de similaridade: 0,30 → 0,35/).waitFor();
+  await text(/Limiar de similaridade: [0-9,]+ → 0,35/).waitFor();
   check(true, 'mudança registrada no histórico com valor anterior e novo (nota 4)');
   await field('Prazo de retenção do acervo').fill('12');
   await visible(page.getByRole('button', { name: /^Salvar 1 alteração/ })).click();

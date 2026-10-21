@@ -9,6 +9,7 @@ import { fonts, panel } from '@/theme/tokens';
 /** One status per card, in the order that matters most to the photographer. */
 export function imageStatus(i: ImageItem): { label: string; bg: string; fg: string } {
   if (i.removal_deadline) return { label: 'Remoção solicitada', bg: panel.dangerSoft, fg: panel.danger };
+  if (i.approval === 'pending') return { label: 'Aguardando aprovação', bg: panel.warningSoft, fg: panel.warning };  // RF031
   if (i.review_status === 'in_review') return { label: 'Em conferência', bg: panel.primarySoft, fg: panel.primaryText };
   if (i.review_status === 'discarded') return { label: 'Descartada', bg: panel.page, fg: panel.muted };
   if (i.indexing_status === 'failed') return { label: 'Falha', bg: panel.dangerSoft, fg: panel.danger };

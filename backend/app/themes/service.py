@@ -1,12 +1,14 @@
 """Event themes maintained by the administrator (RF027)."""
 from __future__ import annotations
 
+import re
+
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app import audit
-from app.db.models import Account, Theme, event_themes
-from app.events.service import EventError, NotFound
+from app.db.models import Account, AccountRole, Theme, event_themes
+from app.events.service import EventError, NotFound, PermissionDenied
 
 
 def list_with_counts(db: Session) -> list[tuple[Theme, int]]:
@@ -34,21 +36,41 @@ def _clean(db: Session, name: str, ignore_id: int | None = None) -> str:
     return name
 
 
-def create(db: Session, admin: Account, name: str) -> Theme:
-    theme = Theme(name=_clean(db, name), active=True)
+ICON = re.compile(r"^[a-z0-9-]{1,40}$")
+DEFAULT_ICON = "tag"
+
+
+def _icon(icon: str | None) -> str:
+    """The symbol is the NAME of an icon the front-end draws (lucide set); unknown names are
+    drawn as the default tag there, so only the format is checked here."""
+    icon = (icon or DEFAULT_ICON).strip()
+    if not ICON.match(icon):
+        raise EventError("Ícone inválido.")
+    return icon
+
+
+def create(db: Session, admin: Account, name: str, icon: str | None = None) -> Theme:
+    """By the administrator (Temas screen) or by whoever is filling in an event — the creator owns it."""
+    if admin.role == AccountRole.CONTRACTOR:  # RF031 note 1: a temporary account does not create themes
+        raise PermissionDenied("Esta conta não cria temas.")
+    theme = Theme(name=_clean(db, name), active=True, icon=_icon(icon), created_by=admin.id)
     db.add(theme)
     db.flush()
-    audit.record(db, "theme.created", admin.id, "theme", str(theme.id), name=theme.name)
+    audit.record(db, "theme.created", admin.id, "theme", str(theme.id), name=theme.name, icon=theme.icon)
     db.commit()
     return theme
 
 
-def rename(db: Session, admin: Account, theme_id: int, name: str) -> Theme:
+def rename(db: Session, admin: Account, theme_id: int, name: str, icon: str | None = None) -> Theme:
+    """Edits the name and, when given, the symbol — each change in the audit log."""
     theme = _get(db, theme_id)
     new = _clean(db, name, theme.id)
     if new != theme.name:
         audit.record(db, "theme.renamed", admin.id, "theme", str(theme.id), previous=theme.name, new=new)
         theme.name = new
+    if icon is not None and (new_icon := _icon(icon)) != theme.icon:
+        audit.record(db, "theme.icon_changed", admin.id, "theme", str(theme.id), previous=theme.icon, new=new_icon)
+        theme.icon = new_icon
     db.commit()
     return theme
 

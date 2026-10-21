@@ -6,6 +6,11 @@ import type { EventItem } from '@/api/events';
 import { Pill, StatusPill } from '@/components/panel/ui';
 import { fonts, panel } from '@/theme/tokens';
 
+const RELATION_PILL: Partial<Record<EventItem['relation'], string>> = {
+  collaborator: 'Colaboração', viewer: 'Só visualização', contractor: 'Contratado',
+};
+const owner = (e: EventItem) => `${e.owner.full_name}${e.owner.team ? ` — ${e.owner.team}` : ''}`;
+
 /** "Tabela de eventos" of the Visão geral and Eventos screens. Rows open the event. */
 export function EventsTable({ events }: { events: EventItem[] }) {
   const { width } = useWindowDimensions();
@@ -18,10 +23,11 @@ export function EventsTable({ events }: { events: EventItem[] }) {
           <Pressable key={e.id} accessibilityRole="link" onPress={() => router.navigate(`/eventos/${e.id}`)} style={styles.cardRow}>
             <View style={{ flex: 1, gap: 6 }}>
               <Text style={styles.name}>{e.name}</Text>
-              <Text style={styles.cell}>{e.date_label} · {e.location} · {e.photos} fotos</Text>
+              <Text style={styles.cell}>{e.date_label} · {e.location} · {e.photos} {e.photos === 1 ? 'imagem' : 'imagens'}</Text>
               <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
-                <StatusPill status={e.status} />
-                {e.relation === 'collaborator' && <Pill label="Colaboração" />}
+                <StatusPill status={e.status} deleting={!!e.deletion_due_at} />
+                {RELATION_PILL[e.relation] && <Pill label={RELATION_PILL[e.relation]!} />}
+                {e.approvals_pending > 0 && <Pill label={`${e.approvals_pending} a aprovar`} bg={panel.warningSoft} fg={panel.warning} />}
               </View>
             </View>
             <ChevronRight size={18} color={panel.muted} strokeWidth={1.6} absoluteStrokeWidth />
@@ -37,7 +43,7 @@ export function EventsTable({ events }: { events: EventItem[] }) {
         <Text style={[styles.th, { width: 310 }]}>EVENTO</Text>
         <Text style={[styles.th, { width: 130 }]}>DATA</Text>
         <Text style={[styles.th, { width: 145 }]}>LOCAL</Text>
-        <Text style={[styles.th, { width: 120 }]}>FOTOS</Text>
+        <Text style={[styles.th, { width: 120 }]}>IMAGENS</Text>
         <Text style={[styles.th, { width: 160 }]}>STATUS</Text>
         <Text style={[styles.th, { flex: 1, textAlign: 'right' }]}>AÇÕES</Text>
       </View>
@@ -48,15 +54,20 @@ export function EventsTable({ events }: { events: EventItem[] }) {
           <View style={{ width: 310, paddingRight: 12, gap: 4 }}>
             <Text style={styles.name} numberOfLines={1}>{e.name}</Text>
             {/* Adaptation (RF025): events of other photographers with collaboration released. */}
-            {e.relation === 'collaborator' && <Text style={styles.collab}>Colaboração · responsável: {e.owner.full_name}</Text>}
+            {RELATION_PILL[e.relation] && <Text style={styles.collab}>{RELATION_PILL[e.relation]} · responsável: {owner(e)}</Text>}
+            {e.relation !== 'owner' && !RELATION_PILL[e.relation] && e.owner.team && <Text style={styles.collab}>Responsável: {owner(e)}</Text>}
           </View>
           <Text style={[styles.cell, { width: 130 }]}>{e.date_label}</Text>
           <View style={{ width: 145, flexDirection: 'row', alignItems: 'center', gap: 6, paddingRight: 8 }}>
             <MapPin size={15} color={panel.muted} strokeWidth={1.6} absoluteStrokeWidth />
             <Text style={[styles.cell, { flex: 1 }]} numberOfLines={2}>{e.location}</Text>
           </View>
-          <Text style={[styles.cell, { width: 120 }]}>{e.photos} {e.photos === 1 ? 'foto' : 'fotos'}</Text>
-          <View style={{ width: 160 }}><StatusPill status={e.status} /></View>
+          <Text style={[styles.cell, { width: 120 }]}>{e.photos} {e.photos === 1 ? 'imagem' : 'imagens'}</Text>
+          <View style={{ width: 160, gap: 4, alignItems: 'flex-start' }}>
+            <StatusPill status={e.status} deleting={!!e.deletion_due_at} />
+            {/* RF031: photos of a hired photographer waiting for the administrator. */}
+            {e.approvals_pending > 0 && <Pill label={`${e.approvals_pending} a aprovar`} bg={panel.warningSoft} fg={panel.warning} />}
+          </View>
           <View style={{ flex: 1, alignItems: 'flex-end' }}>
             <ChevronRight size={18} color={panel.muted} strokeWidth={1.6} absoluteStrokeWidth />
           </View>

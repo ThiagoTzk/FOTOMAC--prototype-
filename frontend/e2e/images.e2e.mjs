@@ -1,10 +1,11 @@
 // End-to-end test of part 2b-2 (upload → review → publish → facial indexing → images →
-// download), in a real browser against the real API, InsightFace and SeaweedFS.
+// download), in a real browser against the real API, YuNet + SFace and SeaweedFS.
 //
 //   node e2e/images.e2e.mjs <photos-folder> <cover.jpg> [screenshot-folder]
 //
 // photos-folder must contain: grupo.jpg (a group photo), grupo-copia.jpg (same bytes),
-// sem-rosto-1.jpg, sem-rosto-2.jpg and png-disfarcado.jpg (a PNG with a .jpg name).
+// sem-rosto-1.jpg, sem-rosto-2.jpg and nao-imagem.jpg (a text file with a .jpg name).
+// The other photo formats (HEIC, PNG, WebP, RAW) are covered by e2e/formats.e2e.mjs.
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -69,12 +70,13 @@ try {
   console.log('2. Envio: validação antes de enviar (06)');
   await page.goto(`${WEB}/eventos/${eventId}/enviar`);
   await text('Arraste suas fotos aqui').waitFor();
-  check(await text('Antes de enviar: pessoas menores de 18 anos').isVisible(), 'advertência de menores visível (RF007 nota 12)');
-  await page.locator('input[type=file]').setInputFiles(['grupo.jpg', 'sem-rosto-1.jpg', 'sem-rosto-2.jpg', 'png-disfarcado.jpg']
+  // 19/10/2026: everything about minors left the system until the official answer of the advisor.
+  check(!(await text(/menores de 18 anos/).isVisible().catch(() => false)), 'sem advertência de menores (retirada em 19/10)');
+  await page.locator('input[type=file]').setInputFiles(['grupo.jpg', 'sem-rosto-1.jpg', 'sem-rosto-2.jpg', 'nao-imagem.jpg']
     .map((f) => join(PHOTOS, f)));
   await text('Arquivos selecionados · 4').waitFor();
   await visible(page.getByRole('button', { name: 'Iniciar envio (3)' })).waitFor();
-  check(await text('Inválido').isVisible(), 'PNG com nome .jpg recusado pela assinatura binária');
+  check(await text('Inválido').isVisible(), 'arquivo que não é imagem, com nome .jpg, recusado pela assinatura binária');
   await shot('envio-selecao');
 
   console.log('3. Acompanhamento do envio (07)');
@@ -110,7 +112,7 @@ try {
   await shot('visualizacao-individual');
   await visible(page.getByRole('button', { name: 'Fechar', exact: true })).click();
 
-  console.log('6. Publicação (10) e indexação facial com o InsightFace (11)');
+  console.log('6. Publicação (10) e indexação facial com o YuNet + SFace (11)');
   await visible(page.getByRole('button', { name: 'Publicar 2 imagens' })).first().click();
   await text('Publicar imagens?').waitFor();
   await shot('confirmar-publicacao');

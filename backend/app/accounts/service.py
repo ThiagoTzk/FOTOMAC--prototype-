@@ -8,21 +8,26 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from app import audit
+from app import audit, parameters
+from app.accounts import identity
 from app.auth import service as auth
 from app.auth.service import _revoke_all_sessions
-from app.db.models import Account, AccountRole, AccountStatus, Event, PasswordToken, PasswordTokenPurpose
+from app.db.models import (AUTHOR_ROLES, Account, AccountRole, AccountStatus, Event, EventStatus, Image, PasswordToken,
+                           PasswordTokenPurpose)
 from app.events.service import EventError, NotFound, PermissionDenied
 from app.notifications.port import EmailMessage, EmailSender
 
-ROLE_LABEL = {AccountRole.ADMIN: "Administrador", AccountRole.PHOTOGRAPHER: "Fotógrafo"}
+ROLE_LABEL = {AccountRole.ADMIN: "Administrador", AccountRole.PHOTOGRAPHER: "Fotógrafo",
+              AccountRole.MARKETING: "Marketing", AccountRole.CONTRACTOR: "Fotógrafo contratado"}
 STATUS_LABEL = {AccountStatus.PENDING: "Acesso Pendente", AccountStatus.ACTIVE: "Ativa",
-                AccountStatus.INACTIVE: "Inativa", AccountStatus.SUSPENDED: "Suspensa"}
+                AccountStatus.INACTIVE: "Inativa", AccountStatus.SUSPENDED: "Suspensa",
+                AccountStatus.EXPIRED: "Expirada"}
+CONTRACTOR_HOURS = 24  # RF031 note 2: from the moment the password is defined
 INSTITUTIONAL_DOMAIN = "cesmac.edu.br"
 
 
@@ -36,6 +41,8 @@ class AccountInput:
     email: str
     role: AccountRole
     photographer_signature: str | None
+    bound_event_id: uuid.UUID | None = None   # temporary account only (RF031)
+    contract_number: str | None = None
 
 
 def _clean_name(name: str) -> str:
@@ -47,10 +54,16 @@ def _clean_name(name: str) -> str:
     return name
 
 
+def is_institutional(email: str) -> bool:
+    """cesmac.edu.br or one of its subdomains (e.g. academico.cesmac.edu.br)."""
+    domain = email.rsplit("@", 1)[-1].lower()
+    return domain == INSTITUTIONAL_DOMAIN or domain.endswith("." + INSTITUTIONAL_DOMAIN)
+
+
 def _clean_signature(role: AccountRole, signature: str | None) -> str | None:
     signature = " ".join((signature or "").split()) or None
-    if role == AccountRole.PHOTOGRAPHER and not signature:
-        raise EventError("A assinatura é obrigatória para o perfil Fotógrafo (é o crédito nas fotos).")  # note 4
+    if role in AUTHOR_ROLES and not signature:
+        raise EventError("A assinatura é obrigatória para quem envia fotos (é o crédito nas fotos).")  # note 4
     if signature and len(signature) > 80:
         raise EventError("A assinatura pode ter até 80 caracteres.")
     return signature
@@ -106,14 +119,28 @@ def create_account(db: Session, admin: Account, sender: EmailSender, data: Accou
     email = data.email.strip()
     if "@" not in email or len(email) > 100 or " " in email:
         raise EventError("Informe um e-mail válido, com até 100 caracteres.")  # RF001 note 2
+    # Whoever works for the CESMAC has an institutional e-mail; only the hired photographer, who does
+    # not, may use a personal one (decision of 17/10/2026, RF001 note 2 of requirements v2.0).
+    if data.role != AccountRole.CONTRACTOR and not is_institutional(email):
+        raise EventError(f"Use o e-mail institucional (@{INSTITUTIONAL_DOMAIN}). E-mail pessoal só para fotógrafo contratado.")
     if db.scalar(select(Account.id).where(func.lower(Account.email) == email.lower())):
         raise EventError("Já existe uma conta com este e-mail.")
     account = Account(full_name=name, email=email, role=data.role,
                       photographer_signature=_clean_signature(data.role, data.photographer_signature),
                       status=AccountStatus.PENDING)  # no password: RF001 notes 5 and 6
+    if data.role == AccountRole.CONTRACTOR:  # RF031: one event, one contract
+        identity._key()  # refuse early if the server cannot encrypt the identification later
+        event = db.get(Event, data.bound_event_id) if data.bound_event_id else None
+        if event is None or event.status == EventStatus.EXPIRED:
+            raise EventError("Escolha o evento para o qual o fotógrafo foi contratado.")
+        contract = " ".join((data.contract_number or "").split())
+        if not 1 <= len(contract) <= 60:
+            raise EventError("Informe o número do contrato de prestação de serviço (até 60 caracteres).")
+        account.bound_event_id, account.contract_number = event.id, contract
     db.add(account)
     db.flush()
-    audit.record(db, "account.created", admin.id, "account", account.id, role=data.role.value)
+    audit.record(db, "account.created", admin.id, "account", account.id, role=data.role.value,
+                 **({"event_id": str(account.bound_event_id)} if account.bound_event_id else {}))
     auth.send_activation_link(db, account, sender)  # commits
     return account
 
@@ -124,6 +151,29 @@ def resend_activation(db: Session, admin: Account, sender: EmailSender, account:
         raise EventError("Só contas em “Acesso Pendente” recebem o link de definição de senha.")
     audit.record(db, "account.activation_resent", admin.id, "account", account.id)
     auth.send_activation_link(db, account, sender)
+
+
+# TEMPORÁRIO — REMOVER ANTES DA IMPLANTAÇÃO (pedido do Thiago, 14/10/2026, demonstração ao fotógrafo).
+# Shows the activation link to the administrator instead of e-mailing it. In production that would
+# let any administrator take over any pending account, which is exactly what RF001 note 5 forbids
+# (the link goes ONLY to the holder's e-mail). So it exists only while e-mails are not really sent
+# (email_sender == "outbox", development); on the CESMAC server it answers "not found".
+def dev_mode_link_available() -> bool:
+    from app.config import get_settings
+    return get_settings().email_sender == "outbox"
+
+
+def dev_activation_link(db: Session, admin: Account, account: Account) -> str:
+    from app.config import get_settings
+    if not dev_mode_link_available():
+        raise NotFound("Recurso indisponível.")
+    if account.status != AccountStatus.PENDING:
+        raise EventError("Só contas em “Acesso Pendente” têm link de definição de senha.")
+    token = auth._issue_link(db, account, PasswordTokenPurpose.ACTIVATION)  # the previous link stops working
+    audit.record(db, "account.activation_link_shown_dev", admin.id, "account", account.id)
+    db.commit()
+    return f"{get_settings().frontend_url}/primeiro-acesso?token={token}"
+# FIM DO TRECHO TEMPORÁRIO
 
 
 # ------------------------------------------------------------------ edit (name, role, signature)
@@ -138,6 +188,8 @@ def update_account(db: Session, admin: Account, account: Account, full_name: str
     if role != account.role:
         if account.id == admin.id:
             raise PermissionDenied("Você não pode alterar o seu próprio perfil.")
+        if AccountRole.CONTRACTOR in (role, account.role):  # RF001 note 3
+            raise EventError("A conta de fotógrafo contratado não pode ser convertida em outro perfil, nem o contrário.")
         if account.role == AccountRole.ADMIN and account.status == AccountStatus.ACTIVE and _active_admins(db) <= 1:
             raise EventError("Esta é a única conta de administrador ativa; o sistema ficaria sem administrador.")
     changes = {}
@@ -166,8 +218,10 @@ def change_status(db: Session, admin: Account, sender: EmailSender, account: Acc
     Events and photos of the account stay in the collection with their credit (note 2)."""
     if account.id == admin.id:
         raise PermissionDenied("Você não pode alterar a situação da sua própria conta.")
-    if target == AccountStatus.PENDING:
-        raise EventError("“Acesso Pendente” é controlado pelo sistema.")
+    if target in (AccountStatus.PENDING, AccountStatus.EXPIRED):
+        raise EventError("Essa situação é controlada pelo sistema.")
+    if account.status == AccountStatus.EXPIRED:  # RF003 note 6
+        raise EventError("Conta temporária expirada não pode ser reativada. Para nova cobertura, crie uma nova conta.")
     if target == account.status:
         return account
     if (account.role == AccountRole.ADMIN and account.status == AccountStatus.ACTIVE
@@ -200,6 +254,56 @@ def change_status(db: Session, admin: Account, sender: EmailSender, account: Acc
     if account.status == AccountStatus.PENDING:
         auth.send_activation_link(db, account, sender)
     return account
+
+
+# ------------------------------------------------------------------ temporary account (RF031)
+
+def contractor_identity(db: Session, account: Account) -> dict | None:
+    """What the administrator sees of the identification: CPF masked, birth date (RF031 note 7)."""
+    if account.role != AccountRole.CONTRACTOR:
+        return None
+    if account.identity_erased_at:
+        return {"cpf": None, "birth_date": None, "erased_at": account.identity_erased_at}
+    birth = identity.decrypt(db, account.birth_date_encrypted)
+    return {"cpf": identity.masked_cpf(identity.decrypt(db, account.cpf_encrypted)), "birth_date": birth, "erased_at": None}
+
+
+def expire_contractors(db: Session) -> int:
+    """24 h after the password was defined the temporary account becomes "Expirada": sessions end
+    at once and it is never reactivated (RF031 note 4, RF003 note 6). It is kept — never deleted."""
+    due = db.scalars(select(Account).where(Account.role == AccountRole.CONTRACTOR,
+                                           Account.status == AccountStatus.ACTIVE,
+                                           Account.valid_until.is_not(None), Account.valid_until <= _now())).all()
+    for account in due:
+        account.status = AccountStatus.EXPIRED
+        _revoke_all_sessions(db, account.id)
+        audit.record(db, "account.expired", None, "account", account.id)
+    if due:
+        db.commit()
+    return len(due)
+
+
+def erase_contractor_identities(db: Session) -> int:
+    """RF031 note 7: CPF and birth date are kept while the photos sent by the account are in the
+    collection, plus the period set by the administrator (provisional, to be defined by the legal
+    department). Then they are erased; the name stays in the operation records (RF003 note 4)."""
+    months = parameters.get(db, "contractor_identity_months")
+    erased = 0
+    for account in db.scalars(select(Account).where(Account.role == AccountRole.CONTRACTOR,
+                                                    Account.status == AccountStatus.EXPIRED,
+                                                    Account.identity_erased_at.is_(None))).all():
+        if db.scalar(select(func.count()).select_from(Image).where(Image.uploaded_by == account.id)):
+            account.media_gone_at = None
+            continue
+        if account.media_gone_at is None:
+            account.media_gone_at = _now()
+        elif account.media_gone_at + timedelta(days=30 * months) <= _now():
+            account.cpf_encrypted = account.birth_date_encrypted = None
+            account.identity_erased_at = _now()
+            audit.record(db, "account.identity_erased", None, "account", account.id)
+            erased += 1
+    db.commit()
+    return erased
 
 
 def unlock(db: Session, admin: Account, account: Account) -> Account:

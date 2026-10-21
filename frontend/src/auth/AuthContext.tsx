@@ -6,8 +6,12 @@ export type Account = {
   id: string;
   full_name: string;
   email: string;
-  role: 'admin' | 'photographer';
+  role: 'admin' | 'photographer' | 'marketing' | 'contractor';
+  role_label: string;
   photographer_signature: string | null;
+  /** Temporary account of the hired photographer (RF031): when it stops working, and its only event. */
+  valid_until: string | null;
+  bound_event_id: string | null;
 };
 
 type AuthState = {

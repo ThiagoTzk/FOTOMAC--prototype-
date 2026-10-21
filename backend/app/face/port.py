@@ -5,11 +5,13 @@ its own internal interface, so that no other layer depends on the adopted librar
 
 How it works (ports & adapters):
 - This file defines the "socket" (FaceEngine). It imports no face library at all.
-- Each technology is an "adapter" in its own file (insightface_engine.py today) that
-  implements this socket.
-- app/face/factory.py picks the adapter by name from the configuration.
+- Each technology is an "adapter" in its own file (sface_engine.py today: YuNet + SFace)
+  that implements this socket.
+- app/face/factory.py (the builder) lists the adapters and builds the one the administrator
+  chose in the panel.
 
-Swapping technology = writing a new adapter + changing FOTOMAC_FACE_ENGINE.
+Swapping technology = writing a new adapter + one line in factory.ENGINES; the administrator
+then switches to it in the panel ("Reconhecimento facial"), which re-indexes the collection.
 Vectors from different models are NOT comparable, which is why every vector is stored
 with `model_version` and a model swap triggers re-indexing (RF010 note 7, RF028).
 """
@@ -48,6 +50,10 @@ class DetectedFace:
     embedding: np.ndarray
     # Position in the list the detector returned; last tie-breaker of RF017.
     detector_index: int
+    # The 5 points of the face (eyes, nose tip, mouth corners), in pixels, when the detector gives
+    # them — used only to tell the POSE of a frame in the guided capture (public search and precision
+    # test). Never stored.
+    landmarks: tuple[tuple[float, float], ...] | None = None
 
     def __repr__(self) -> str:  # keeps the vector out of logs and tracebacks
         return (f"DetectedFace(bbox={self.bbox}, detection_score={self.detection_score:.3f}, "
@@ -58,9 +64,9 @@ class DetectedFace:
 class FaceEngine(Protocol):
     """Contract every facial recognition adapter must fulfil."""
 
-    #: Identifier stored with every vector, e.g. "insightface-1.0.1/buffalo_l".
+    #: Identifier stored with every vector, e.g. "opencv-5.0.0/yunet-2023mar+sface-2021dec/teste1".
     model_version: str
-    #: Size of the vectors this engine produces (512 for buffalo_l).
+    #: Size of the vectors this engine produces (128 for SFace).
     vector_dim: int
 
     def detect(self, image: np.ndarray) -> list[DetectedFace]:
@@ -86,3 +92,9 @@ class NoFaceDetectedError(FaceEngineError):
 
 class FaceQualityTooLowError(FaceEngineError):
     pass
+
+
+class FaceEngineUnavailable(FaceEngineError):
+    """The engine could not be loaded (model file missing or altered). Safe failure: the search
+    pauses with a notice and the indexing queue waits — the system never falls back to another
+    model by itself, because vectors of different models do not compare."""

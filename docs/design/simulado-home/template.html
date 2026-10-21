@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FOTOMAC — simulado da página inicial (web)</title>
+<style>
+  /* Tokens of frontend/src/theme/tokens.ts (CITEC's Figma): Poppins, institutional blue and yellow. */
+  @font-face { font-family: Poppins; font-weight: 400; src: url(assets/Poppins_400Regular.ttf); }
+  @font-face { font-family: Poppins; font-weight: 500; src: url(assets/Poppins_500Medium.ttf); }
+  @font-face { font-family: Poppins; font-weight: 600; src: url(assets/Poppins_600SemiBold.ttf); }
+  @font-face { font-family: Poppins; font-weight: 700; src: url(assets/Poppins_700Bold.ttf); }
+  @font-face { font-family: Montserrat; font-weight: 400; src: url(assets/Montserrat_400Regular.ttf); }
+  @font-face { font-family: Montserrat; font-weight: 800; src: url(assets/Montserrat_800ExtraBold.ttf); }
+  :root {
+    --primary: #007DC5; --navy: #072D44; --navy-2: #0B3B5A; --yellow: #FFC506; --sky: #44C8F5;
+    --page: #F2F2F7; --surface: #FFFFFF; --title: #111827; --heading: #1F2937; --text: #374151;
+    --muted: #4B5563; --soft: #6B7280; --line: #E5E7EB; --chip: #E5E5EA;
+    --pill-blue-bg: rgba(68, 200, 245, .20); --pill-yellow-bg: rgba(255, 205, 11, .20); --pill-yellow-fg: #A88406;
+    --shadow: 0 4px 12px 2px rgba(0,0,0,.08); --shadow-card: 0 1px 3px rgba(0,0,0,.08), 0 8px 24px rgba(5,27,59,.06);
+    --wrap: 1200px;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { font-family: Poppins, system-ui, sans-serif; color: var(--text); background: var(--page); -webkit-font-smoothing: antialiased; }
+  a { color: inherit; text-decoration: none; }
+  svg { flex: none; }
+  .wrap { max-width: var(--wrap); margin: 0 auto; padding: 0 32px; }
+
+  /* Mockup notice — keeps the sample events from being mistaken for real ones. */
+  .mock { background: var(--yellow); color: var(--navy); font-size: 12px; font-weight: 600; text-align: center; padding: 6px 16px; }
+
+  /* Top bar: full width, white (CITEC visitor header), menu + staff access. */
+  .top { background: var(--surface); box-shadow: var(--shadow); position: sticky; top: 0; z-index: 10; }
+  .top .wrap { height: 76px; display: flex; align-items: center; gap: 40px; }
+  .brand { display: inline-flex; align-items: center; gap: 8px; }
+  .brand img { height: 34px; display: block; }
+  .brand .word { font: 400 25px Montserrat, sans-serif; color: var(--primary); letter-spacing: .01em; }
+  .brand .word b { font-weight: 800; }
+  .top nav { display: flex; gap: 28px; flex: 1; }
+  .top nav a { font-size: 15px; font-weight: 500; color: var(--heading); padding: 6px 0; border-bottom: 2px solid transparent; }
+  .top nav a.on, .top nav a:hover { color: var(--primary); border-bottom-color: var(--primary); }
+  .btn { display: inline-flex; align-items: center; gap: 8px; height: 44px; padding: 0 18px; border-radius: 12px;
+         font: 600 15px Poppins, sans-serif; border: 0; cursor: pointer; }
+  .btn-outline { border: 1.5px solid var(--primary); color: var(--primary); background: transparent; }
+  .btn-primary { background: var(--primary); color: #fff; }
+  .btn-yellow { background: var(--yellow); color: var(--navy); }
+
+  /* Hero: full-width brand band. No faces in the showcase — only the photo owner's search shows people. */
+  .hero { position: relative; overflow: hidden; color: #fff;
+          background: radial-gradient(1200px 500px at 85% -10%, rgba(68,200,245,.35), transparent 60%),
+                      linear-gradient(120deg, var(--navy) 0%, var(--navy-2) 45%, var(--primary) 100%); }
+  .hero .wrap { position: relative; padding-top: 72px; padding-bottom: 64px; }
+  .hero .eyebrow { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; letter-spacing: .04em;
+                   text-transform: uppercase; color: var(--yellow); }
+  .hero h1 { font-size: 46px; line-height: 1.15; font-weight: 700; max-width: 760px; margin-top: 14px; }
+  .hero p.lead { font-size: 18px; line-height: 1.6; color: rgba(255,255,255,.85); max-width: 720px; margin-top: 14px; }
+  .search { margin-top: 34px; max-width: 760px; height: 68px; background: #fff; border-radius: 18px; display: flex; align-items: center;
+            gap: 12px; padding: 0 8px 0 22px; box-shadow: 0 18px 40px rgba(0,0,0,.25); }
+  .search input { flex: 1; border: 0; outline: 0; font: 400 17px Poppins, sans-serif; color: var(--text); background: transparent; }
+  .search .btn { height: 52px; padding: 0 26px; border-radius: 13px; }
+  .hero .filters { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; align-items: center; }
+  .chip-f { display: inline-flex; align-items: center; gap: 8px; height: 40px; padding: 0 14px; border-radius: 10px; font-size: 14px;
+            font-weight: 500; color: #fff; border: 1px solid rgba(255,255,255,.45); background: rgba(255,255,255,.08); }
+  .hero .help { font-size: 14px; color: rgba(255,255,255,.85); margin-left: 8px; }
+  .hero .help a { color: #fff; font-weight: 600; text-decoration: underline; }
+  /* Decorative face-scan frame (the system's own symbol language), right side of the band. */
+  .scan { position: absolute; right: 32px; top: 50%; transform: translateY(-50%); width: 280px; height: 280px; opacity: .9; }
+  .scan .corner { position: absolute; width: 70px; height: 70px; border: 5px solid rgba(255,255,255,.55); }
+  .scan .c1 { left: 0; top: 0; border-right: 0; border-bottom: 0; border-top-left-radius: 26px; }
+  .scan .c2 { right: 0; top: 0; border-left: 0; border-bottom: 0; border-top-right-radius: 26px; }
+  .scan .c3 { left: 0; bottom: 0; border-right: 0; border-top: 0; border-bottom-left-radius: 26px; }
+  .scan .c4 { right: 0; bottom: 0; border-left: 0; border-top: 0; border-bottom-right-radius: 26px; }
+  .scan .face { position: absolute; inset: 60px; display: flex; align-items: center; justify-content: center; }
+  .scan .tag { position: absolute; left: 50%; bottom: -14px; transform: translateX(-50%); background: var(--yellow); color: var(--navy);
+               font-size: 13px; font-weight: 700; padding: 6px 14px; border-radius: 999px; white-space: nowrap;
+               box-shadow: 0 8px 20px rgba(0,0,0,.25); }
+
+  /* Theme strip — the photographer's tags (2.0) as browsing shortcuts, like Fotop's categories. */
+  .themes { background: var(--surface); border-bottom: 1px solid var(--line); }
+  .themes .wrap { position: relative; padding-top: 18px; padding-bottom: 18px; }
+  .themes .rail { display: flex; gap: 8px; overflow-x: auto; scroll-behavior: smooth; scrollbar-width: none; padding: 4px 44px; }
+  .themes .rail::-webkit-scrollbar { display: none; }
+  .themes .arrow { position: absolute; top: 50%; transform: translateY(-50%); width: 40px; height: 40px; border-radius: 50%;
+                   background: #fff; border: 1px solid var(--line); box-shadow: 0 2px 8px rgba(0,0,0,.12); display: flex;
+                   align-items: center; justify-content: center; cursor: pointer; color: var(--heading); z-index: 2; }
+  .themes .arrow.l { left: 28px; } .themes .arrow.r { right: 28px; }
+  .themes .fade { position: absolute; top: 0; bottom: 0; width: 70px; pointer-events: none; z-index: 1; }
+  .themes .fade.l { left: 32px; background: linear-gradient(90deg, #fff 45%, rgba(255,255,255,0)); }
+  .themes .fade.r { right: 32px; background: linear-gradient(270deg, #fff 45%, rgba(255,255,255,0)); }
+  .theme { flex: 0 0 112px; display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 12px 6px; border-radius: 14px;
+           font-size: 13px; font-weight: 500; color: var(--muted); cursor: pointer; text-align: center; line-height: 1.35; }
+  .theme .ic { width: 52px; height: 52px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+               background: var(--pill-blue-bg); color: var(--primary); }
+  .theme:nth-child(even) .ic { background: var(--pill-yellow-bg); color: var(--pill-yellow-fg); }
+  .theme:hover { background: var(--page); color: var(--heading); }
+  .theme.on { background: #E8F5FC; color: var(--primary); font-weight: 600; }
+
+  /* Events */
+  section.block { padding: 56px 0; }
+  .head { display: flex; align-items: flex-end; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+  .head h2 { font-size: 28px; font-weight: 600; color: var(--title); }
+  .head .sub { font-size: 15px; color: var(--soft); margin-top: 4px; }
+  .head .spacer { flex: 1; }
+  .select { display: inline-flex; align-items: center; gap: 8px; height: 42px; padding: 0 14px; border: 1px solid #D1D5DB;
+            border-radius: 10px; background: #fff; font-size: 14px; color: var(--heading); }
+  .select b { font-weight: 600; }
+  .see-all { display: inline-flex; align-items: center; gap: 4px; font-size: 15px; font-weight: 600; color: var(--primary); }
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; }
+  .card { background: #fff; border-radius: 16px; overflow: hidden; box-shadow: var(--shadow-card); display: flex; flex-direction: column;
+          transition: transform .15s, box-shadow .15s; cursor: pointer; }
+  .card:hover { transform: translateY(-3px); box-shadow: 0 2px 6px rgba(0,0,0,.08), 0 16px 32px rgba(5,27,59,.12); }
+  .cover { position: relative; aspect-ratio: 16 / 11; background: #D9D9D9; }
+  .cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .cover.ph { display: flex; align-items: center; justify-content: center; color: rgba(255,255,255,.9); }
+  .cover .badge { position: absolute; left: 12px; top: 12px; width: 34px; height: 34px; border-radius: 50%; background: rgba(255,255,255,.95);
+                  display: flex; align-items: center; justify-content: center; color: var(--primary); box-shadow: 0 2px 6px rgba(0,0,0,.15); }
+  .cover .count { position: absolute; right: 12px; bottom: 12px; display: inline-flex; gap: 6px; align-items: center; height: 28px; padding: 0 10px;
+                  border-radius: 8px; background: rgba(7,45,68,.82); color: #fff; font-size: 12px; font-weight: 500; }
+  .cover .new { position: absolute; right: 12px; top: 12px; background: var(--yellow); color: var(--navy); font-size: 11px; font-weight: 700;
+                padding: 3px 9px; border-radius: 6px; }
+  .body { padding: 16px 18px 18px; display: flex; flex-direction: column; gap: 8px; flex: 1; }
+  .body h3 { font-size: 15px; line-height: 1.4; font-weight: 600; color: var(--heading); display: -webkit-box; -webkit-line-clamp: 2;
+             -webkit-box-orient: vertical; overflow: hidden; min-height: 42px; }
+  .meta { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--muted); }
+  .meta svg { color: var(--primary); }
+  .pills { display: flex; gap: 6px; flex-wrap: wrap; margin-top: auto; padding-top: 4px; }
+  .pill { font-size: 11px; padding: 3px 10px; border-radius: 30px; background: var(--pill-blue-bg); color: var(--primary); }
+  .pill.y { background: var(--pill-yellow-bg); color: var(--pill-yellow-fg); }
+  .more { display: flex; justify-content: center; margin-top: 36px; }
+
+  /* How it works */
+  .how { background: #fff; }
+  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 32px; margin-top: 8px; }
+  .step { display: flex; gap: 18px; align-items: flex-start; }
+  .step .n { width: 56px; height: 56px; border-radius: 16px; background: #E8F5FC; color: var(--primary); display: flex; align-items: center;
+             justify-content: center; flex: none; position: relative; }
+  .step .n span { position: absolute; top: -8px; right: -8px; width: 24px; height: 24px; border-radius: 50%; background: var(--yellow);
+                  color: var(--navy); font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+  .step h4 { font-size: 17px; font-weight: 600; color: var(--heading); }
+  .step p { font-size: 14px; line-height: 1.6; color: var(--muted); margin-top: 4px; }
+
+  /* Privacy band — the Fotop "institutional" dark band, used for what matters here: LGPD. */
+  .privacy { background: var(--navy); color: #fff; }
+  .privacy .wrap { display: grid; grid-template-columns: 1.1fr 1.4fr; gap: 56px; align-items: center; padding-top: 64px; padding-bottom: 64px; }
+  .privacy h2 { font-size: 32px; line-height: 1.25; font-weight: 700; }
+  .privacy h2 em { font-style: normal; color: var(--yellow); }
+  .privacy p { font-size: 15px; line-height: 1.7; color: rgba(255,255,255,.8); margin-top: 14px; }
+  .privacy .btn { margin-top: 24px; }
+  .facts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .fact { background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.1); border-radius: 16px; padding: 20px; }
+  .fact .ic { width: 40px; height: 40px; border-radius: 12px; background: rgba(255,197,6,.15); color: var(--yellow); display: flex;
+              align-items: center; justify-content: center; }
+  .fact h5 { font-size: 15px; font-weight: 600; margin-top: 12px; }
+  .fact p { font-size: 13px; line-height: 1.55; margin-top: 4px; color: rgba(255,255,255,.72); }
+
+  /* Footer */
+  footer { background: #fff; border-top: 1px solid var(--line); }
+  footer .cols { display: grid; grid-template-columns: 1.6fr 1fr 1fr 1fr; gap: 32px; padding-top: 48px; padding-bottom: 36px; }
+  footer .about { font-size: 13px; line-height: 1.7; color: var(--soft); margin-top: 14px; max-width: 340px; }
+  footer h6 { font-size: 14px; font-weight: 600; color: var(--heading); margin-bottom: 12px; }
+  footer ul { list-style: none; padding: 0; display: grid; gap: 10px; }
+  footer li a { font-size: 14px; color: var(--muted); }
+  footer li a:hover { color: var(--primary); }
+  footer .legal > div { border-top: 1px solid var(--line); display: flex; justify-content: space-between; padding: 18px 0 22px;
+                        font-size: 13px; color: var(--soft); }
+
+  @media (max-width: 1100px) { .grid { grid-template-columns: repeat(3, 1fr); } .scan { display: none; } }
+  @media (max-width: 820px) { .grid { grid-template-columns: repeat(2, 1fr); } .steps, .privacy .wrap, footer .cols { grid-template-columns: 1fr; }
+                              .top nav { display: none; } .hero h1 { font-size: 34px; } }
+</style>
+</head>
+<body>
+
+<div class="mock">SIMULADO DE DESIGN — só a “Colação de Grau” é real; os outros eventos são exemplos para preencher a página.</div>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="#" aria-label="FOTOMAC"><img src="assets/fotomac-symbol.png" alt=""><span class="word">FOTO<b>MAC</b></span></a>
+    <nav aria-label="Menu principal">
+      <a class="on" href="#">Eventos</a>
+      <a href="#como-funciona">Como funciona</a>
+      <a href="#privacidade">Privacidade</a>
+      <a href="#">Solicitar remoção</a>
+    </nav>
+    <a class="btn btn-outline" href="#">{{icon:log-in:18}} Acesso da equipe</a>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="wrap">
+    <div class="eyebrow">{{icon:camera:16}} Acervo fotográfico oficial do CESMAC</div>
+    <h1>Participou de um evento do CESMAC? Encontre suas fotos.</h1>
+    <p class="lead">Escolha o evento, tire uma selfie e veja apenas as fotos em que você aparece.</p>
+    <div class="search" role="search">
+      {{icon:search:22:#9CA3AF}}
+      <input placeholder="Digite o nome do evento — ex.: colação, semana de tecnologia…" aria-label="Buscar evento">
+      <button class="btn btn-yellow">{{icon:search:18}} Buscar</button>
+    </div>
+    <div class="filters">
+      <span class="chip-f">{{icon:tag:16}} Tema {{icon:chevron-down:16}}</span>
+      <span class="chip-f">{{icon:calendar:16}} Data {{icon:chevron-down:16}}</span>
+      <span class="chip-f">{{icon:clock:16}} Período {{icon:chevron-down:16}}</span>
+      <span class="help">Não sabe o nome do evento? <a href="#eventos">Veja todos os eventos</a></span>
+    </div>
+    <div class="scan" aria-hidden="true">
+      <div class="corner c1"></div><div class="corner c2"></div><div class="corner c3"></div><div class="corner c4"></div>
+      <div class="face">{{icon:scan-face:150:rgba(255,255,255,.9):1.2}}</div>
+      <div class="tag">Só as suas fotos</div>
+    </div>
+  </div>
+</section>
+
+<div class="themes" aria-label="Temas">
+  <div class="wrap">
+    <button class="arrow l" aria-label="Temas anteriores" onclick="this.parentNode.querySelector('.rail').scrollBy(-480,0)">{{icon:chevron-left:20}}</button>
+    <span class="fade l"></span><span class="fade r"></span>
+    <button class="arrow r" aria-label="Mais temas" onclick="this.parentNode.querySelector('.rail').scrollBy(480,0)">{{icon:chevron-right:20}}</button>
+    <div class="rail">
+    <a class="theme on"><span class="ic">{{icon:layout-grid:24}}</span>Todos</a>
+    <a class="theme"><span class="ic">{{icon:graduation-cap:24}}</span>Colação de grau</a>
+    <a class="theme"><span class="ic">{{icon:cpu:24}}</span>Tecnologia</a>
+    <a class="theme"><span class="ic">{{icon:flask-conical:24}}</span>Ciência</a>
+    <a class="theme"><span class="ic">{{icon:heart-pulse:24}}</span>Saúde</a>
+    <a class="theme"><span class="ic">{{icon:palette:24}}</span>Cultura</a>
+    <a class="theme"><span class="ic">{{icon:trophy:24}}</span>Esporte</a>
+    <a class="theme"><span class="ic">{{icon:lightbulb:24}}</span>Inovação</a>
+    <a class="theme"><span class="ic">{{icon:party-popper:24}}</span>Confraternização</a>
+    <a class="theme"><span class="ic">{{icon:stethoscope:24}}</span>Jaleco branco</a>
+    <a class="theme"><span class="ic">{{icon:music:24}}</span>Música</a>
+    <a class="theme"><span class="ic">{{icon:mic:24}}</span>Palestras</a>
+    <a class="theme"><span class="ic">{{icon:award:24}}</span>Premiações</a>
+    <a class="theme"><span class="ic">{{icon:users:24}}</span>Recepção de calouros</a>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="eventos">
+  <div class="wrap">
+    <div class="head">
+      <div>
+        <h2>Eventos recentes</h2>
+        <div class="sub">Fotos disponíveis por 6 meses após o evento.</div>
+      </div>
+      <div class="spacer"></div>
+      <span class="select">Ordenar: <b>Mais recentes</b> {{icon:chevron-down:16}}</span>
+      <a class="see-all" href="#">Ver todos os eventos {{icon:chevron-right:18}}</a>
+    </div>
+    <div class="grid">
+      {{card:real}}
+      {{card:Semana de Tecnologia e Inovação 2026|Setembro/2026|Auditório Central – Campus 1|326|cpu|Tecnologia|Inovação|#007DC5|#072D44}}
+      {{card:Jaleco Branco – Medicina 2026.2|Agosto/2026|Teatro Gustavo Leite|512|stethoscope|Saúde|Colação de grau|#0B3B5A|#44C8F5}}
+      {{card:Feira de Ciências do CESMAC|Agosto/2026|Pátio – Campus 2|208|flask-conical|Ciência||#072D44|#007DC5}}
+      {{card:Jogos Universitários – Abertura|Julho/2026|Ginásio Poliesportivo|741|trophy|Esporte||#007DC5|#44C8F5}}
+      {{card:Mostra Cultural de Arte e Música|Junho/2026|Centro Cultural CESMAC|167|palette|Cultura||#0B3B5A|#007DC5}}
+      {{card:Congresso de Enfermagem|Junho/2026|Campus 1 – Bloco C|289|heart-pulse|Saúde||#072D44|#44C8F5}}
+      {{card:Confraternização dos Servidores|Dezembro/2025|Espaço de Eventos|154|party-popper|Confraternização||#007DC5|#0B3B5A}}
+    </div>
+    <div class="more"><button class="btn btn-primary">Ver mais eventos</button></div>
+  </div>
+</section>
+
+<section class="block how" id="como-funciona">
+  <div class="wrap">
+    <div class="head"><div><h2>Como funciona</h2><div class="sub">Três passos, sem criar conta.</div></div></div>
+    <div class="steps">
+      <div class="step"><div class="n">{{icon:calendar-search:26}}<span>1</span></div>
+        <div><h4>Escolha o evento</h4><p>Pesquise pelo nome ou navegue pelos temas e pela data.</p></div></div>
+      <div class="step"><div class="n">{{icon:scan-face:26}}<span>2</span></div>
+        <div><h4>Tire uma selfie</h4><p>Ela serve só para esta busca e é descartada logo depois. Antes, você lê e aceita o aviso de uso de imagem.</p></div></div>
+      <div class="step"><div class="n">{{icon:download:26}}<span>3</span></div>
+        <div><h4>Baixe suas fotos</h4><p>Veja apenas as fotos em que você aparece e baixe em qualidade original, com o crédito do fotógrafo.</p></div></div>
+    </div>
+  </div>
+</section>
+
+<section class="privacy" id="privacidade">
+  <div class="wrap">
+    <div>
+      <h2>Suas fotos aparecem <em>só para você</em>.</h2>
+      <p>O rosto é dado pessoal sensível pela LGPD. Por isso o FOTOMAC foi desenhado para que ninguém veja a galeria inteira de um evento — nem a sua foto de busca.</p>
+      <a class="btn btn-yellow" href="#">{{icon:shield-check:18}} Política de Privacidade</a>
+    </div>
+    <div class="facts">
+      <div class="fact"><div class="ic">{{icon:lock:20}}</div><h5>Galeria privada</h5><p>As fotos de um evento só aparecem para quem foi encontrado nelas.</p></div>
+      <div class="fact"><div class="ic">{{icon:camera-off:20}}</div><h5>Selfie nunca guardada</h5><p>Compara, mostra o resultado e descarta.</p></div>
+      <div class="fact"><div class="ic">{{icon:calendar-check:20}}</div><h5>Busca só no evento</h5><p>Nunca no acervo inteiro da instituição.</p></div>
+      <div class="fact"><div class="ic">{{icon:trash:20}}</div><h5>Remoção em até 72 h</h5><p>Peça a remoção de uma foto sua a qualquer momento.</p></div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap cols">
+    <div>
+      <span class="brand" aria-label="FOTOMAC"><img src="assets/fotomac-symbol.png" alt=""><span class="word">FOTO<b>MAC</b></span></span>
+      <p class="about">Acervo fotográfico dos eventos do Centro Universitário CESMAC. As fotos destinam-se exclusivamente às pessoas nelas retratadas.</p>
+    </div>
+    <div><h6>FOTOMAC</h6><ul><li><a href="#">Eventos</a></li><li><a href="#">Como funciona</a></li></ul></div>
+    <div><h6>Privacidade</h6><ul><li><a href="#">Política de Privacidade</a></li><li><a href="#">Solicitar remoção</a></li></ul></div>
+    <div><h6>Equipe</h6><ul><li><a href="#">Acesso da equipe</a></li></ul></div>
+  </div>
+  <div class="wrap legal"><div><span>© 2026 Centro Universitário CESMAC</span><span>Maceió – AL</span></div></div>
+</footer>
+</body>
+</html>

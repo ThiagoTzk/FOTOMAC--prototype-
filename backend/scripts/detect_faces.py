@@ -4,7 +4,7 @@
     .venv/bin/python scripts/detect_faces.py FOTO.jpg --compare SELFIE.jpg
 
 Goes through the same path the system uses (decode → FaceEngine port → RF017 selection),
-so it only ever talks to the adapter, never to InsightFace directly.
+so it only ever talks to the adapter in use (chosen in the panel), never to a model library directly.
 
 Privacy: everything happens in memory. Vectors are never printed or saved. The only file
 written is the annotated copy in backend/samples/, a folder excluded from git — delete it
@@ -21,8 +21,11 @@ import cv2
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.config import get_settings  # noqa: E402
-from app.face.factory import get_face_engine  # noqa: E402
+from sqlalchemy.orm import Session  # noqa: E402
+
+from app import parameters  # noqa: E402
+from app.db.session import get_engine  # noqa: E402
+from app.face.factory import active_engine  # noqa: E402
 from app.face.port import FaceEngineError  # noqa: E402
 from app.face.selection import select_query_face  # noqa: E402
 from app.imaging import decode_image  # noqa: E402
@@ -35,10 +38,11 @@ def main() -> int:
     parser.add_argument("photo", type=Path, help="foto do evento (JPEG)")
     parser.add_argument("--compare", type=Path, help="autorretrato: procura essa pessoa na foto")
     args = parser.parse_args()
-    settings = get_settings()
-
     t0 = time.perf_counter()
-    engine = get_face_engine()
+    with Session(get_engine()) as db:  # the same engine and threshold the system is using now
+        engine = active_engine(db)
+        threshold = parameters.get(db, "similarity_threshold")
+        min_score, min_side = parameters.get(db, "min_detection_score"), parameters.get(db, "min_query_face_side")
     print(f"Motor: {engine.model_version} (vetor de {engine.vector_dim} dimensões) "
           f"— carregado em {time.perf_counter() - t0:.1f} s")
 
@@ -53,12 +57,12 @@ def main() -> int:
         selfie = decode_image(args.compare.read_bytes())
         try:
             query = select_query_face(engine.detect(selfie), selfie.shape[1], selfie.shape[0],
-                                      settings.min_detection_score, settings.min_query_face_side)
+                                      min_score, min_side)
         except FaceEngineError as exc:
             print(f"\nAutorretrato recusado: {exc}")
             return 1
         similarities = {f.detector_index: float(query.embedding @ f.embedding) for f in faces}
-        print(f"Comparando com {args.compare.name} — limiar de similaridade {settings.similarity_threshold}")
+        print(f"Comparando com {args.compare.name} — limiar de similaridade {threshold}")
 
     annotated = image.copy()
     for f in faces:
@@ -67,7 +71,7 @@ def main() -> int:
         color = (200, 120, 0)
         if f.detector_index in similarities:
             sim = similarities[f.detector_index]
-            match = sim >= settings.similarity_threshold
+            match = sim >= threshold
             line += f", similaridade {sim:+.3f}" + ("  ← É A PESSOA" if match else "")
             color = (0, 200, 0) if match else (0, 0, 220)
         print(line)
@@ -76,7 +80,7 @@ def main() -> int:
                     max(0.6, image.shape[1] / 1600), color, 2)
 
     if similarities:
-        found = sum(s >= settings.similarity_threshold for s in similarities.values())
+        found = sum(s >= threshold for s in similarities.values())
         print(f"\nResultado: {'a pessoa APARECE nesta foto' if found else 'a pessoa NÃO aparece nesta foto'}")
 
     SAMPLES.mkdir(exist_ok=True)

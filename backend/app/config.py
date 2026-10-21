@@ -26,18 +26,19 @@ class Settings(BaseSettings):
     s3_bucket: str = "fotomac-acervo"
     s3_region: str = "us-east-1"  # S3 clients require one; SeaweedFS ignores it.
 
-    # Facial recognition adapter, chosen by name (see app/face/factory.py).
-    face_engine: str = "insightface"
+    # Facial recognition engine of a FRESH installation (see app/face/factory.py). After that, the
+    # administrator chooses it in the panel and the choice lives in the database.
+    face_engine: str = "sface"
+    # Folder with the model files (ONNX). Not versioned: infra/setup_local.sh downloads them.
+    face_models_dir: Path = BACKEND_DIR / "models"
 
     # FACTORY defaults of parameters the administrator can change in the panel (RF026, app/parameters.py).
-    # Detection confidence: 0.5 is InsightFace's own factory value (FaceAnalysis det_thresh),
-    # kept unchanged so production behaves like the model measured in fotomac-lab's Test 1.
+    # Detection confidence: 0.50 is the value of fotomac-lab's Test 1 for YuNet (MIN_DET_SCORE), kept
+    # so production behaves like the model that was measured. The similarity threshold is not here:
+    # each engine brings its own calibrated value (factory.ENGINES).
     min_detection_score: float = 0.5
     # Query face only (RF017): smallest accepted face side, in pixels, in the visitor's selfie.
     min_query_face_side: int = 40
-    # Cosine similarity threshold (RF016). Test 1: the highest-scoring WRONG photo was 0.2783,
-    # so 0.30 returned no third-party photo. Precision over recall (RF016 note 6, RNF18).
-    similarity_threshold: float = 0.30
     max_results_per_search: int = 200
 
     # Web front-end (Expo) — used to build the links sent by e-mail and for CORS.
@@ -58,6 +59,17 @@ class Settings(BaseSettings):
     # Background queue (facial indexing, packages) inside the API process. Tests turn it off
     # and drive the queue step by step.
     background_worker: bool = True
+
+    # DEVELOPMENT ONLY: logs the numbers measured by the liveness check of the public search
+    # (how far the head turned in each step, how alike the poses are). Numbers only — never an
+    # image, a frame or a vector. Used to confirm the movement convention with real faces; off
+    # in production (RF024 note 6).
+    diagnostics_log: bool = False
+
+    # Key of the pgcrypto encryption of the hired photographer's CPF and birth date (RF031 note 7).
+    # Lives ONLY here (backend/.env, outside the database): a copy of the database alone does not
+    # reveal them. Required to create temporary accounts.
+    identity_key: str | None = None
 
 
 @lru_cache

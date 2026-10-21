@@ -1,23 +1,18 @@
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { Image } from 'expo-image';
-import { CircleCheck, Download, Info, LoaderCircle, TriangleAlert, Upload, Users } from 'lucide-react-native';
+import { Clock, Eye, Trash2, TriangleAlert, Undo2, Users } from 'lucide-react-native';
 import { useCallback, useState } from 'react';
 import { ActivityIndicator, StyleSheet, Switch, Text, View } from 'react-native';
 
-import { coverUrl, getEvent, isoToBr, setCollaboration, type EventItem } from '@/api/events';
+import { cancelDeletion, coverUrl, getEvent, isoToBr, requestDeletion, setCollaboration, type EventItem } from '@/api/events';
+import { EventProgress } from '@/components/panel/EventProgress';
+import { EventTabs } from '@/components/panel/EventTabs';
+import { Modal } from '@/components/panel/Modal';
+import { useAuth } from '@/auth/AuthContext';
 import { MONTH_NAMES } from '@/components/panel/dates';
 import { PageHeader } from '@/components/panel/PageHeader';
-import { Button, Card, Notice, SectionTitle, StatusPill, Tabs, statusLabel } from '@/components/panel/ui';
+import { Button, Card, InfoItem, Notice, SectionTitle, StatusPill, statusLabel } from '@/components/panel/ui';
 import { fonts, panel } from '@/theme/tokens';
-
-function InfoItem({ label, value, style }: { label: string; value: string; style?: object }) {
-  return (
-    <View style={[{ gap: 5 }, style]}>
-      <Text style={styles.infoLabel}>{label}</Text>
-      <Text style={styles.infoValue}>{value}</Text>
-    </View>
-  );
-}
 
 function longDate(e: EventItem) {
   if (e.date_precision !== 'day') return e.date_label;
@@ -27,11 +22,14 @@ function longDate(e: EventItem) {
 
 /** Figma "05 — Detalhes do evento" + Colaboração card (adaptation for RF025). */
 export default function EventDetailsScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { id, aba } = useLocalSearchParams<{ id: string; aba?: string }>();
   const [event, setEvent] = useState<EventItem | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<'overview' | 'images' | 'info'>('overview');
+  const tab = aba === 'colaboracao' ? 'info' : 'overview';     // in the URL: Imagens links back to a tab
+  const [restored, setRestored] = useState(false);            // deletion just undone: event left unpublished
   const [saving, setSaving] = useState(false);
+  const { account } = useAuth();
+  const [deleting, setDeleting] = useState<string | null>(null);  // the date the photos would go, if confirmed now
 
   useFocusEffect(useCallback(() => { getEvent(id).then(setEvent).catch((e) => setError(e.message)); }, [id]));
 
@@ -43,7 +41,24 @@ export default function EventDetailsScreen() {
     try { setEvent(await setCollaboration(event!.id, open)); } finally { setSaving(false); }
   }
 
-  const inReview = event.photos - event.published;
+  const viewer = event.relation === 'viewer';           // marketing on someone else's published event (RF030)
+  const contractor = event.relation === 'contractor';   // hired photographer, temporary account (RF031)
+  const scheduled = !!event.deletion_due_at;          // "Excluir evento" asked: out of the site, can be undone
+  const toImages = (filter?: string) => router.navigate(`/eventos/${event.id}/imagens${filter ? `?filtro=${filter}` : ''}`);
+  const dueLabel = (iso: string) => new Date(iso).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
+
+  async function confirmDeletion() {
+    setSaving(true);
+    try { setEvent(await requestDeletion(event!.id)); setDeleting(null); } catch (e) {
+      setError(e instanceof Error ? e.message : 'Não foi possível excluir.'); setDeleting(null);
+    } finally { setSaving(false); }
+  }
+  async function undoDeletion() {
+    setSaving(true);
+    try { setEvent(await cancelDeletion(event!.id)); setRestored(true); } catch (e) {
+      setError(e instanceof Error ? e.message : 'Não foi possível desfazer.');
+    } finally { setSaving(false); }
+  }
   const photographers = event.collaborators.length
     ? event.collaborators.map((c) => c.signature).join(', ')
     : event.owner.full_name;
@@ -51,17 +66,16 @@ export default function EventDetailsScreen() {
   return (
     <>
       <PageHeader crumbs={[{ label: 'Eventos', href: '/eventos' }, { label: event.name }]} title={event.name}
-                  badge={<StatusPill status={event.status} />}
+                  badge={<StatusPill status={event.status} deleting={scheduled} />}
                   actions={event.status !== 'expired' ? (
                     <>
-                      {event.can_manage && <Button variant="secondary" label="Editar evento" onPress={() => router.navigate(`/eventos/${event.id}/editar`)} />}
-                      {/* Responsible/admin always; others only while collaboration is open (RF025). */}
-                      {(event.can_manage || event.collaboration_open) && (
-                        <Button icon={Upload} label="Enviar imagens" onPress={() => router.navigate(`/eventos/${event.id}/enviar`)} />)}
+                      {event.can_manage && !scheduled && <Button variant="secondary" label="Editar evento" onPress={() => router.navigate(`/eventos/${event.id}/editar`)} />}
+                      {event.can_manage && !scheduled && <Button variant="danger" icon={Trash2} label="Excluir evento"
+                                                                    onPress={() => setDeleting(new Date(Date.now() + event.deletion_grace_days * 86400000).toLocaleDateString('pt-BR'))} />}
                     </>) : undefined} />
-
-      <Tabs tabs={[{ key: 'overview', label: 'Visão geral' }, { key: 'images', label: 'Imagens' }, { key: 'info', label: 'Colaboração' }]}
-            value={tab} onChange={(k) => (k === 'images' ? router.navigate(`/eventos/${event.id}/imagens`) : setTab(k))} />
+      {/* Sending and publishing images live in the Imagens tab; the overview keeps what is about the
+          event itself — edit and delete (17/10/2026). */}
+      <EventTabs event={event} value={tab} />
 
       {tab === 'overview' && (
         <>
@@ -81,36 +95,42 @@ export default function EventDetailsScreen() {
               <View style={styles.divider} />
               <View style={styles.infoRow}>
                 <InfoItem label={event.collaborators.length > 1 ? 'Fotógrafos' : 'Fotógrafo'} value={photographers} style={styles.cell} />
-                <InfoItem label="Status" value={statusLabel(event.status)} style={styles.cell} />
-                <InfoItem label="Quantidade de fotos" value={String(event.photos)} style={styles.cell} />
+                <InfoItem label="Criado por" value={`${event.owner.full_name}${event.owner.team ? ` — ${event.owner.team}` : ''}`} style={styles.cell} />
+                <InfoItem label="Status" value={statusLabel(event.status, scheduled)} style={styles.cell} />
+                <InfoItem label="Quantidade de imagens" value={String(event.photos)} style={styles.cell} />
                 <InfoItem label="Expiração do acervo" value={isoToBr(event.expires_on)} style={styles.cell} />
               </View>
             </Card>
           </View>
-          {inReview > 0 ? (
-            <Notice tone="info" icon={Info} title="Próxima ação recomendada"
-                    description={`${inReview} ${inReview === 1 ? 'imagem aguarda' : 'imagens aguardam'} conferência e publicação.`}
-                    actionLabel="Conferir imagens" onAction={() => router.navigate(`/eventos/${event.id}/conferencia`)} />
-          ) : event.status === 'editing' ? (
-            <Notice tone="info" icon={Info} title="Próxima ação recomendada"
-                    description="Envie e confira as imagens para publicar o acervo deste evento."
-                    actionLabel="Enviar imagens" onAction={() => router.navigate(`/eventos/${event.id}/enviar`)} />
-          ) : null}
-          {event.status === 'processing' && (
-            <Notice tone="info" icon={LoaderCircle} title="Indexação facial em andamento"
-                    description="O evento ficará público quando todas as imagens publicadas forem processadas."
-                    actionLabel="Acompanhar" onAction={() => router.navigate(`/eventos/${event.id}/processamento`)} />
+          {scheduled && (
+            <Notice tone="danger" icon={Trash2} title={`Exclusão agendada para ${dueLabel(event.deletion_due_at!)}`}
+                    description="O evento já saiu do site e os dados de reconhecimento facial foram apagados. Até a data acima as fotos continuam guardadas e a exclusão pode ser desfeita — o evento volta despublicado, para você conferir e publicar de novo. Depois, tudo é eliminado definitivamente."
+                    actionLabel={event.can_manage ? 'Desfazer exclusão' : undefined} onAction={event.can_manage ? undoDeletion : undefined} />
           )}
-          {event.published > 0 ? (
-            <Notice tone="success" icon={Download} title={event.can_manage ? 'Baixar acervo' : 'Baixar minhas imagens'}
-                    description="Prepare um pacote ZIP com as fotografias originais publicadas, com os créditos nos metadados."
-                    actionLabel="Preparar pacote" onAction={() => router.navigate(`/eventos/${event.id}/download`)} />
-          ) : (
-            <Notice tone="success" icon={CircleCheck} title="Download após publicação"
-                    description="A ação Baixar acervo ficará disponível quando o evento tiver imagens publicadas." />
+          {restored && !scheduled && event.status === 'editing' && (
+            <Notice tone="warning" icon={Undo2} title="Exclusão desfeita — o evento não está publicado"
+                    description="As imagens voltaram para a conferência e o evento não aparece no site. Confira, exclua o que não deve voltar e publique de novo: só então o evento volta ao site e os rostos são indexados outra vez."
+                    actionLabel="Conferir e publicar" onAction={() => toImages('in_review')} />
           )}
-          <Notice tone="warning" icon={TriangleAlert} title="Prazo de retenção"
-                  description={`O acervo deste evento será eliminado automaticamente em ${isoToBr(event.expires_on)}, junto com os dados do reconhecimento facial. Baixe o pacote antes, se precisar guardar as fotos.`} />
+          {viewer && (
+            <Notice tone="info" icon={Eye} title="Só visualização"
+                    description="Você vê as imagens publicadas deste evento para escolher o que divulgar e pode baixá-las, uma a uma ou em pacote, sem marca d'água e com o aviso de propriedade do CESMAC no arquivo. As imagens em conferência e as que tiveram remoção pedida não aparecem. Cada download fica registrado."
+                    actionLabel="Ir para Imagens" onAction={() => toImages()} />
+          )}
+          {contractor && account?.valid_until && (
+            <Notice tone="warning" icon={Clock}
+                    title={`Conta temporária: vale até ${new Date(account.valid_until).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })}`}
+                    description="Você vê e gerencia só as imagens que enviou. Elas são publicadas depois da aprovação da administração, com o seu crédito."
+                    actionLabel="Ir para Imagens" onAction={() => toImages()} />
+          )}
+          {account?.role === 'admin' && event.approvals_pending > 0 && (
+            <Notice tone="warning" icon={Clock}
+                    title={`${event.approvals_pending} ${event.approvals_pending === 1 ? 'imagem aguarda' : 'imagens aguardam'} a sua aprovação`}
+                    description="Enviadas por fotógrafo contratado. Só entram na publicação depois de aprovadas (RF031)."
+                    actionLabel="Revisar" onAction={() => toImages('pending_approval')} />
+          )}
+          {/* D1 (17/10/2026): one card with the steps of the event instead of a pile of notices. */}
+          {!viewer && !contractor && !scheduled && <EventProgress event={event} />}
         </>
       )}
 
@@ -145,6 +165,23 @@ export default function EventDetailsScreen() {
           )}
         </Card>
       )}
+      <Modal visible={!!deleting} onClose={() => setDeleting(null)} icon={Trash2} tone="danger" title="Excluir este evento?" width={520}>
+        <View style={{ gap: 12 }}>
+          <Text style={styles.text}>
+            “{event.name}” sai do site agora e os dados de reconhecimento facial das fotos são apagados na hora.
+          </Text>
+          <Text style={styles.text}>
+            As {event.photos} {event.photos === 1 ? 'foto fica guardada' : 'fotos ficam guardadas'} por {event.deletion_grace_days}{' '}
+            {event.deletion_grace_days === 1 ? 'dia' : 'dias'} (até {deleting}). Nesse prazo você pode desfazer a exclusão — o evento
+            volta despublicado, para você conferir e publicar de novo. Depois,
+            fotos, capa e pacotes são eliminados definitivamente e não há como recuperar.
+          </Text>
+          <View style={{ flexDirection: 'row', gap: 10, justifyContent: 'flex-end' }}>
+            <Button variant="secondary" label="Cancelar" onPress={() => setDeleting(null)} />
+            <Button variant="danger" label="Excluir evento" loading={saving} onPress={confirmDeletion} />
+          </View>
+        </View>
+      </Modal>
     </>
   );
 }

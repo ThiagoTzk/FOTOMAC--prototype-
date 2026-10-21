@@ -6,7 +6,7 @@ processing (RF002 note 4). There is deliberately no DELETE (RF003 note 4).
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -38,9 +38,24 @@ class AccountRow(BaseModel):
     created_at: datetime
 
 
+class ContractorOut(BaseModel):
+    """Temporary account (RF031). The CPF is shown masked; nothing here leaves the administrator's area."""
+    event_id: uuid.UUID | None
+    event_name: str | None
+    contract_number: str | None
+    valid_until: datetime | None
+    cpf: str | None              # "***.***.***-12"
+    birth_date: date | None
+    identity_erased_at: datetime | None
+    photos: int
+    photos_pending: int          # awaiting the administrator's approval
+
+
 class AccountDetail(AccountRow):
     owned_events: int
     is_me: bool
+    contractor: ContractorOut | None = None
+    dev_link_available: bool = False  # TEMPORÁRIO — remover antes da implantação (see service.dev_activation_link)
 
 
 def _row(db: Session, a: Account) -> dict:
@@ -50,8 +65,26 @@ def _row(db: Session, a: Account) -> dict:
                 activation_link=service.activation_link_state(db, a), created_at=a.created_at)
 
 
+def _contractor(db: Session, a: Account) -> ContractorOut | None:
+    if a.role != AccountRole.CONTRACTOR:
+        return None
+    from sqlalchemy import func, select
+
+    from app.db.models import Event, Image
+    ident = service.contractor_identity(db, a) or {}
+    event = db.get(Event, a.bound_event_id) if a.bound_event_id else None
+    photos = db.scalar(select(func.count()).select_from(Image).where(Image.uploaded_by == a.id)) or 0
+    pending = db.scalar(select(func.count()).select_from(Image).where(Image.uploaded_by == a.id,
+                                                                     Image.approval == "pending")) or 0
+    return ContractorOut(event_id=a.bound_event_id, event_name=event.name if event else None,
+                         contract_number=a.contract_number, valid_until=a.valid_until, cpf=ident.get("cpf"),
+                         birth_date=ident.get("birth_date"), identity_erased_at=ident.get("erased_at"),
+                         photos=photos, photos_pending=pending)
+
+
 def _detail(db: Session, a: Account, admin: Account) -> AccountDetail:
-    return AccountDetail(**_row(db, a), owned_events=service.owned_events(db, a), is_me=a.id == admin.id)
+    return AccountDetail(**_row(db, a), owned_events=service.owned_events(db, a), is_me=a.id == admin.id,
+                         dev_link_available=service.dev_mode_link_available(), contractor=_contractor(db, a))
 
 
 def _http(exc: EventError) -> HTTPException:
@@ -81,6 +114,8 @@ class AccountIn(BaseModel):
     email: str = Field(max_length=200)
     role: AccountRole
     photographer_signature: str | None = Field(None, max_length=200)
+    bound_event_id: uuid.UUID | None = None                      # hired photographer only (RF031)
+    contract_number: str | None = Field(None, max_length=200)
 
 
 @router.post("", response_model=AccountDetail, status_code=status.HTTP_201_CREATED)
@@ -88,7 +123,8 @@ def create_account(body: AccountIn, admin: Account = Depends(admin_only), db: Se
                    sender: EmailSender = Depends(get_email_sender)):
     try:
         account = service.create_account(db, admin, sender, service.AccountInput(
-            body.full_name, body.email, body.role, body.photographer_signature))
+            body.full_name, body.email, body.role, body.photographer_signature, body.bound_event_id,
+            body.contract_number))
     except EventError as exc:
         raise _http(exc) from None
     return _detail(db, account, admin)
@@ -138,6 +174,20 @@ def resend_activation(account_id: uuid.UUID, admin: Account = Depends(admin_only
         service.resend_activation(db, admin, sender, _get(db, account_id))
     except EventError as exc:
         raise _http(exc) from None
+
+
+# TEMPORÁRIO — REMOVER ANTES DA IMPLANTAÇÃO: development-only link display (service.dev_activation_link).
+class DevLinkOut(BaseModel):
+    url: str
+
+
+@router.post("/{account_id}/activation-link/dev", response_model=DevLinkOut)
+def dev_activation_link(account_id: uuid.UUID, admin: Account = Depends(admin_only), db: Session = Depends(get_session)):
+    try:
+        return DevLinkOut(url=service.dev_activation_link(db, admin, _get(db, account_id)))
+    except EventError as exc:
+        raise _http(exc) from None
+# FIM DO TRECHO TEMPORÁRIO
 
 
 @router.post("/{account_id}/unlock", response_model=AccountDetail)

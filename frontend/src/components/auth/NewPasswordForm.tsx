@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { StyleSheet, View } from 'react-native';
 
 import { ApiError } from '@/api/client';
@@ -14,10 +14,12 @@ type Props = {
   onSubmit: (password: string, confirmation: string) => Promise<void>;
   /** The first-access screen shows an info box above the fields. */
   notice?: string;
+  /** Fields shown before the password (the hired photographer's identification, RF031). */
+  extra?: ReactNode;
 };
 
 /** Shared by "Redefinição de senha" and "Primeiro acesso" — same fields, same rules. */
-export function NewPasswordForm({ submitLabel, onSubmit, notice }: Props) {
+export function NewPasswordForm({ submitLabel, onSubmit, notice, extra }: Props) {
   const [password, setPassword] = useState('');
   const [confirmation, setConfirmation] = useState('');
   const [failed, setFailed] = useState<PasswordRuleKey[] | null>(null);
@@ -54,6 +56,7 @@ export function NewPasswordForm({ submitLabel, onSubmit, notice }: Props) {
       ) : (
         invalid && <Feedback tone="error" message="Revise os campos destacados antes de continuar." />
       )}
+      {extra}
       <TextField
         label="Nova senha"
         value={password}

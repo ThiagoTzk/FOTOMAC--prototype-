@@ -1,8 +1,10 @@
 import { CircleCheck, Pencil, Plus, Trash2, TriangleAlert } from 'lucide-react-native';
 import { useCallback, useEffect, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { createTheme, deleteTheme, listAdminThemes, renameTheme, setThemeActive, type ThemeRow } from '@/api/admin';
+import { ThemeIcon } from '@/components/icons/themeIcons';
+import { IconPicker } from '@/components/panel/IconPicker';
 import { Modal } from '@/components/panel/Modal';
 import { PageHeader } from '@/components/panel/PageHeader';
 import { Button, Card, Field, Input, Notice, Pill } from '@/components/panel/ui';
@@ -11,12 +13,17 @@ import { fonts, panel } from '@/theme/tokens';
 /**
  * "Manutenção dos Temas de Evento" (RF027): the list used in the event form and in the public
  * filters. A theme in use is never deleted, only inactivated (note 1) — the events keep it.
+ * Every theme has a symbol, chosen here, drawn in the public theme strip of the home page.
  */
 export default function ThemesScreen() {
   const [themes, setThemes] = useState<ThemeRow[] | null>(null);
   const [name, setName] = useState('');
+  const [icon, setIcon] = useState('tag');
+  const [picking, setPicking] = useState(false);
   const [editing, setEditing] = useState<ThemeRow | null>(null);
   const [newName, setNewName] = useState('');
+  const [newIcon, setNewIcon] = useState('tag');
+  const add = () => run(() => createTheme(name, icon), `Tema “${name.trim()}” criado.`).then((ok) => { if (ok) { setName(''); setIcon('tag'); } });
   const [removing, setRemoving] = useState<ThemeRow | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
@@ -47,12 +54,19 @@ export default function ThemesScreen() {
       {error && <Notice tone="danger" icon={TriangleAlert} title={error} />}
       <Card padding={20}>
         <View style={styles.add}>
-          <Field label="Novo tema" style={{ flex: 1, minWidth: 220 }} help="Até 50 caracteres; não pode repetir um tema existente.">
-            <Input value={name} onChangeText={setName} maxLength={50} placeholder="Ex.: Robótica" accessibilityLabel="Novo tema"
-                   onSubmitEditing={() => name.trim() && run(() => createTheme(name), `Tema “${name.trim()}” criado.`).then((ok) => ok && setName(''))} />
+          <Field label="Ícone">
+            <Pressable accessibilityRole="button" accessibilityLabel="Escolher o ícone do novo tema" onPress={() => setPicking(true)}
+                       style={({ hovered }: any) => [styles.iconButton, hovered && { borderColor: panel.primary }]}>
+              <ThemeIcon name={icon} size={22} color={panel.primary} strokeWidth={1.7} absoluteStrokeWidth />
+            </Pressable>
           </Field>
-          <Button icon={Plus} label="Adicionar" disabled={!name.trim()} loading={busy}
-                  onPress={() => run(() => createTheme(name), `Tema “${name.trim()}” criado.`).then((ok) => ok && setName(''))} />
+          <Field label="Novo tema" style={{ flex: 1, minWidth: 220 }} help="Até 50 caracteres; não pode repetir um tema existente.">
+            <Input value={name} onChangeText={setName} maxLength={50} placeholder="Ex.: Colação de jaleco" accessibilityLabel="Novo tema"
+                   onSubmitEditing={() => name.trim() && add()} />
+          </Field>
+          <View style={{ paddingTop: 24 }}>
+            <Button icon={Plus} label="Adicionar" disabled={!name.trim()} loading={busy} onPress={add} />
+          </View>
         </View>
       </Card>
       {themes && (
@@ -63,15 +77,19 @@ export default function ThemesScreen() {
             <Text style={[styles.th, { width: 90 }]}>EVENTOS</Text>
             <Text style={[styles.th, { width: 250, textAlign: 'right' }]}>AÇÕES</Text>
           </View>
-          {themes.map((t) => (
+          {themes.map((t) => {
+            return (
             <View key={t.id} accessibilityLabel={`Tema ${t.name}`} style={[styles.row, !t.active && { backgroundColor: panel.page }]}>
-              <Text style={[styles.name, { flex: 1 }, !t.active && { color: panel.muted }]}>{t.name}</Text>
+              <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                <View style={styles.iconBadge}><ThemeIcon name={t.icon} size={18} color={t.active ? panel.primary : panel.muted} strokeWidth={1.7} absoluteStrokeWidth /></View>
+                <Text style={[styles.name, { flex: 1 }, !t.active && { color: panel.muted }]}>{t.name}</Text>
+              </View>
               <View style={{ width: 110 }}>
                 {t.active ? <Pill label="Ativo" bg={panel.successSoft} fg={panel.success} /> : <Pill label="Inativo" bg="#FFFFFF" fg={panel.muted} />}
               </View>
               <Text style={[styles.cell, { width: 90 }]}>{t.events}</Text>
               <View style={styles.actions}>
-                <Action label="Renomear" icon={Pencil} onPress={() => { setEditing(t); setNewName(t.name); }} />
+                <Action label="Editar" icon={Pencil} onPress={() => { setEditing(t); setNewName(t.name); setNewIcon(t.icon); }} />
                 <Action label={t.active ? 'Inativar' : 'Ativar'}
                         onPress={() => run(() => setThemeActive(t.id, !t.active), t.active
                           ? `“${t.name}” inativado: não aparece mais em eventos novos nem nos filtros.` : `“${t.name}” ativado.`)} />
@@ -79,7 +97,8 @@ export default function ThemesScreen() {
                 {t.events === 0 && <Action label="Excluir" icon={Trash2} danger onPress={() => setRemoving(t)} />}
               </View>
             </View>
-          ))}
+            );
+          })}
         </View>
       )}
       <Text style={styles.help}>
@@ -87,15 +106,22 @@ export default function ThemesScreen() {
         nos filtros públicos, mas continua nos eventos que já o usam.
       </Text>
 
-      <Modal visible={!!editing} onClose={() => setEditing(null)} icon={Pencil} title="Renomear tema">
+      <Modal visible={!!editing} onClose={() => setEditing(null)} icon={Pencil} title="Editar tema" width={720}>
         <View style={{ gap: 16 }}>
           <Field label="Nome do tema"><Input value={newName} onChangeText={setNewName} maxLength={50} accessibilityLabel="Nome do tema" /></Field>
-          {!!editing?.events && <Text style={styles.help}>O novo nome aparece também nos {editing.events} evento(s) que usam este tema.</Text>}
+          {!!editing?.events && <Text style={styles.help}>O nome e o ícone mudam também nos {editing.events} evento(s) que usam este tema.</Text>}
+          {/* The icon grid scrolls on its own, so "Salvar" stays in sight below it. */}
+          <ScrollView style={{ maxHeight: 340 }}><IconPicker value={newIcon} onChange={setNewIcon} /></ScrollView>
           <View style={styles.modalActions}>
             <Button variant="secondary" label="Cancelar" onPress={() => setEditing(null)} />
             <Button label="Salvar" loading={busy} disabled={!newName.trim()}
-                    onPress={() => editing && run(() => renameTheme(editing.id, newName), 'Tema renomeado.').then((ok) => ok && setEditing(null))} />
+                    onPress={() => editing && run(() => renameTheme(editing.id, newName, newIcon), 'Tema atualizado.').then((ok) => ok && setEditing(null))} />
           </View>
+        </View>
+      </Modal>
+      <Modal visible={picking} onClose={() => setPicking(false)} icon={Plus} title="Ícone do novo tema" width={720}>
+        <View style={{ gap: 16 }}>
+          <IconPicker value={icon} onChange={(n) => { setIcon(n); setPicking(false); }} />
         </View>
       </Modal>
       <Modal visible={!!removing} onClose={() => setRemoving(null)} icon={Trash2} tone="danger" title="Excluir tema?">
@@ -124,6 +150,9 @@ function Action({ label, icon: Icon, danger, onPress }: { label: string; icon?: 
 
 const styles = StyleSheet.create({
   add: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap' },
+  iconButton: { width: 48, height: 48, borderRadius: 10, borderWidth: 1, borderColor: panel.border, alignItems: 'center',
+                justifyContent: 'center', backgroundColor: panel.primarySoft },
+  iconBadge: { width: 34, height: 34, borderRadius: 17, backgroundColor: panel.primarySoft, alignItems: 'center', justifyContent: 'center' },
   table: { borderWidth: 1, borderColor: panel.border, borderRadius: panel.cardRadius, overflow: 'hidden', backgroundColor: '#FFFFFF' },
   head: { height: 42, backgroundColor: panel.page, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16 },
   th: { fontFamily: fonts.bold, fontSize: 12, color: panel.muted },

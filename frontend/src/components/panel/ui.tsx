@@ -57,6 +57,16 @@ export function Card({ children, style, padding = 20 }: { children: ReactNode; s
   return <View style={[ui.card, { padding }, style]}>{children}</View>;
 }
 
+/** A label over a value, as in the event summary card. */
+export function InfoItem({ label, value, style }: { label: string; value: string; style?: object }) {
+  return (
+    <View style={[{ gap: 5 }, style]}>
+      <Text style={{ fontFamily: fonts.bold, fontSize: 12, color: panel.muted }}>{label}</Text>
+      <Text style={{ fontFamily: fonts.regular, fontSize: 14, lineHeight: 20, color: panel.text }}>{value}</Text>
+    </View>
+  );
+}
+
 export function SectionTitle({ title, action }: { title: string; action?: ReactNode }) {
   return (
     <View style={ui.sectionTitle}>
@@ -77,10 +87,14 @@ const STATUS: Record<EventStatus, { label: string; bg: string; fg: string }> = {
   expired: { label: 'Expirado', bg: panel.page, fg: panel.muted },
 };
 
-export const statusLabel = (s: EventStatus) => STATUS[s].label;
+/** A scheduled deletion overrides the status: the event left the site and is about to go (RF038). */
+const DELETING = { label: 'Exclusão agendada', bg: panel.dangerSoft, fg: panel.danger };
 
-export function StatusPill({ status }: { status: EventStatus }) {
-  return <Pill label={STATUS[status].label} bg={STATUS[status].bg} fg={STATUS[status].fg} />;
+export const statusLabel = (s: EventStatus, deleting = false) => (deleting ? DELETING : STATUS[s]).label;
+
+export function StatusPill({ status, deleting = false }: { status: EventStatus; deleting?: boolean }) {
+  const s = deleting ? DELETING : STATUS[status];
+  return <Pill label={s.label} bg={s.bg} fg={s.fg} />;
 }
 
 export function Pill({ label, bg = panel.primarySoft, fg = panel.primaryText }: { label: string; bg?: string; fg?: string }) {

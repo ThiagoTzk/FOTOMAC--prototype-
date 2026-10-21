@@ -10,7 +10,6 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 
 import cv2
-import insightface.data
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
@@ -26,7 +25,8 @@ from app.indexing.worker import delete_due_removals, index_next
 from app.main import app
 from app.notifications.factory import get_email_sender
 from app.storage.factory import get_storage
-from tests.support import FakeFaceEngine, MemoryStorage, jpeg
+from tests.conftest import FIXTURES
+from tests.support import FakeFaceEngine, MemoryStorage, PosedEngine, jpeg, posed
 
 
 class Outbox:
@@ -39,7 +39,9 @@ class Outbox:
 
 @pytest.fixture(scope="module")
 def engine():
-    return build_engine("insightface")
+    # The real YuNet + SFace; PosedEngine only shifts the face landmarks of test frames to simulate
+    # the head movements of the guided capture (tests/support.py).
+    return PosedEngine(build_engine("sface"))
 
 
 @pytest.fixture
@@ -74,17 +76,20 @@ def make_event(db, owner, name="FeCiAL 2026 - Dia 3", status=m.EventStatus.EDITI
     return e
 
 
-GROUP = cv2.imencode(".jpg", insightface.data.get_image("t1"))[1].tobytes()
+# Public-domain NASA photos, never CESMAC participants (tests/fixtures/README.md).
+CREW = cv2.imread(str(FIXTURES / "apollo11_crew.jpg"))
+GROUP = cv2.imencode(".jpg", CREW)[1].tobytes()
 
 
 def person_crop() -> bytes:
-    """A 'selfie' of the person at the centre of the group photo (face box #0 in Etapa 1)."""
-    return cv2.imencode(".jpg", insightface.data.get_image("t1")[150:560, 330:720])[1].tobytes()
+    """A 'selfie' of the astronaut at the centre of the group photo (Michael Collins): similarity
+    0.98 with his own face, at most 0.32 with the other two (measured with SFace)."""
+    return cv2.imencode(".jpg", CREW[40:420, 450:780])[1].tobytes()
 
 
 def stranger() -> bytes:
-    path = insightface.data.__file__.replace("__init__.py", "images/Tom_Hanks_54745.png")
-    return cv2.imencode(".jpg", cv2.imread(path))[1].tobytes()
+    """Someone who is NOT in the group photo (Eileen Collins): at most 0.24 with any of them."""
+    return cv2.imencode(".jpg", cv2.imread(str(FIXTURES / "astronaut_eileen_collins.png")))[1].tobytes()
 
 
 def publish_and_index(db, storage, engine, owner, event, photos):
@@ -100,8 +105,24 @@ def consent(client, event):
     assert client.post(f"/api/v1/public/events/{event.id}/consent").status_code == 204
 
 
-def search(client, event, selfie):
-    return client.post(f"/api/v1/public/events/{event.id}/search", files={"selfie": ("eu.jpg", selfie, "image/jpeg")})
+FRAMES_PER_STEP = 3  # the browser sends 6; 3 keep the tests fast
+
+
+def search(client, event, selfie, *, order=None, still=False, sides=None):
+    """A complete guided capture (RF036): asks the server for the order of the movements, then sends
+    FRAMES_PER_STEP frames per step. `order` forces another order, `still` makes every frame frontal
+    (a photo held to the camera), `sides` uses another photo for the movements (another person)."""
+    r = client.post(f"/api/v1/public/events/{event.id}/capture")
+    if r.status_code != 200:
+        return r
+    steps = ["frente", *(order or r.json()["order"])]
+    files, labels = [], []
+    for step in steps:
+        frame = posed(sides if sides is not None and step != "frente" else selfie, "frente" if still else step)
+        for _ in range(FRAMES_PER_STEP):
+            files.append(("frames", (f"q{len(files)}.jpg", frame, "image/jpeg")))
+            labels.append(step)
+    return client.post(f"/api/v1/public/events/{event.id}/search", files=files, data={"steps": labels})
 
 
 # ----------------------------------------------------------------- visibility (RF013, RF014)
@@ -159,7 +180,7 @@ def test_consent_record_has_no_link_to_the_person(env, db, engine):
     assert set(m.ConsentRecord.__table__.columns.keys()) == {"id", "event_id", "text_version", "accepted_at"}  # RF015 note 7
 
 
-# ----------------------------------------------------------------- the real search (InsightFace)
+# ----------------------------------------------------------------- the real search (YuNet + SFace)
 
 def test_finds_the_person_and_not_a_stranger(env, db, engine):
     storage, _ = env
@@ -185,6 +206,90 @@ def test_no_face_and_search_limit(env, db, engine):
     assert r.status_code == 422 and r.json()["detail"]["reason"] == "no_face"      # RF017 note 4
     codes = [search(c, e, jpeg(6, w=400, h=300)).status_code for _ in range(10)]
     assert codes[-1] == 429                                                        # RF016 note 8
+
+
+# ----------------------------------------------------------------- guided capture and liveness (RF036, RS028)
+
+def test_the_drawn_order_is_needed_and_used_once(env, db, engine):
+    storage, _ = env
+    owner = photographer(db)
+    e = make_event(db, owner)
+    publish_and_index(db, storage, engine, owner, e, [GROUP])
+    c = TestClient(app)
+    consent(c, e)
+    frame = posed(person_crop(), "frente")
+    files = [("frames", (f"q{n}.jpg", frame, "image/jpeg")) for n in range(6)]
+    r = c.post(f"/api/v1/public/events/{e.id}/search", files=files, data={"steps": ["frente"] * 6})
+    assert r.status_code == 422 and r.json()["detail"]["reason"] == "challenge"      # no order was drawn
+    orders = {tuple(c.post(f"/api/v1/public/events/{e.id}/capture").json()["order"]) for _ in range(12)}
+    assert len(orders) > 1 and all(sorted(o) == ["baixo", "cima", "direita", "esquerda"] for o in orders)
+    assert search(c, e, person_crop()).status_code == 200
+    r = c.post(f"/api/v1/public/events/{e.id}/search", files=files, data={"steps": ["frente"] * 6})
+    assert r.json()["detail"]["reason"] == "challenge"                               # used once
+
+
+def test_a_photo_held_to_the_camera_fails_the_liveness_check(env, db, engine):
+    """RS028: a still photo cannot turn — and a recording made before cannot follow an order
+    drawn now. Neither returns any photo."""
+    storage, _ = env
+    owner = photographer(db)
+    e = make_event(db, owner)
+    publish_and_index(db, storage, engine, owner, e, [GROUP])
+    c = TestClient(app)
+    consent(c, e)
+    still = search(c, e, person_crop(), still=True)
+    assert still.status_code == 422 and still.json()["detail"]["reason"] == "liveness"
+    drawn = c.post(f"/api/v1/public/events/{e.id}/capture").json()["order"]
+    replay = search(c, e, person_crop(), order=list(reversed(drawn)))                # a new draw is made inside
+    assert replay.status_code == 422 and replay.json()["detail"]["reason"] == "liveness"
+    session = db.scalar(select(m.VisitorSession).where(m.VisitorSession.event_id == e.id))
+    assert session.result_ids == [] and session.capture_order is None
+
+
+def test_another_persons_face_in_the_capture_is_refused(env, db, engine):
+    """RF017 note 7: turning one's own head while the frontal frame shows someone else."""
+    storage, _ = env
+    owner = photographer(db)
+    e = make_event(db, owner)
+    publish_and_index(db, storage, engine, owner, e, [GROUP])
+    c = TestClient(app)
+    consent(c, e)
+    r = search(c, e, person_crop(), sides=stranger())
+    assert r.status_code == 422 and r.json()["detail"]["reason"] == "consistency"
+
+
+def test_a_single_uploaded_photo_is_not_accepted(env, db, engine):
+    """The gallery upload is gone (requirements v2.0): no route takes a lone photo any more."""
+    storage, _ = env
+    owner = photographer(db)
+    e = make_event(db, owner)
+    publish_and_index(db, storage, engine, owner, e, [GROUP])
+    c = TestClient(app)
+    consent(c, e)
+    old = c.post(f"/api/v1/public/events/{e.id}/search", files={"selfie": ("eu.jpg", person_crop(), "image/jpeg")})
+    assert old.status_code == 422
+    c.post(f"/api/v1/public/events/{e.id}/capture")
+    one = c.post(f"/api/v1/public/events/{e.id}/search", files=[("frames", ("eu.jpg", person_crop(), "image/jpeg"))],
+                 data={"steps": ["frente"]})
+    assert one.status_code == 422 and one.json()["detail"]["reason"] == "format"
+
+
+def test_the_diagnostics_log_holds_numbers_only(env, db, engine, monkeypatch, caplog):
+    """Development aid to confirm the movement convention with real faces: numbers only — no image,
+    no frame, no vector (RF024 note 6). Off unless FOTOMAC_DIAGNOSTICS_LOG=true."""
+    from types import SimpleNamespace
+    storage, _ = env
+    owner = photographer(db)
+    e = make_event(db, owner)
+    publish_and_index(db, storage, engine, owner, e, [GROUP])
+    monkeypatch.setattr(public_api.service, "get_settings", lambda: SimpleNamespace(diagnostics_log=True))
+    c = TestClient(app)
+    consent(c, e)
+    with caplog.at_level("INFO", logger="fotomac.liveness"):
+        search(c, e, person_crop())
+    (line,) = [r.getMessage() for r in caplog.records if r.name == "fotomac.liveness"]
+    assert line.startswith("busca aceita") and "esquerda" in line and "mesma_pessoa" in line
+    assert len(line) < 1500                                                          # no 128-number vector in it
 
 
 def test_search_never_crosses_events(env, db, engine):
@@ -214,7 +319,8 @@ def test_selfie_is_not_stored_anywhere(env, db, engine):
     assert set(storage.objects) == objects_before                                   # RF016 note 4
     assert db.scalar(select(func.count()).select_from(m.FaceEmbedding)) == vectors_before
     entry = db.scalar(select(m.AuditLog).where(m.AuditLog.action == "public.search").order_by(m.AuditLog.id.desc()))
-    assert entry.actor_account_id is None and set(entry.details) == {"found"}       # aggregated, anonymous (RF024)
+    assert entry.actor_account_id is None and set(entry.details) == {"found", "poses"}  # aggregated, anonymous (RF024)
+    assert entry.details["poses"] == 5                                              # front + the 4 movements
 
 
 # ----------------------------------------------------------------- private gallery (RF014, RF019, RS001)
@@ -234,7 +340,9 @@ def test_images_are_served_only_from_this_sessions_result(env, db, engine):
     assert c.get(f"/api/v1/public/images/{landscape_id}/thumb").status_code == 404   # same event, not in the result
     link = c.post(f"/api/v1/public/images/{group_id}/download-link").json()["url"]
     dl = c.get(link)
-    assert dl.status_code == 200 and dl.content == storage.get(db.get(m.Image, group_id).object_key)  # the original
+    original = storage.get(db.get(m.Image, group_id).object_key)
+    assert dl.status_code == 200 and dl.content != original                     # a marked copy (RF019 note 9)
+    assert cv2.imdecode(np.frombuffer(dl.content, np.uint8), 1).shape == cv2.imdecode(np.frombuffer(original, np.uint8), 1).shape
     assert "attachment" in dl.headers["content-disposition"] and dl.headers["cache-control"] == "no-store"
     assert c.get(f"/api/v1/public/images/{group_id}/download").status_code == 403    # no signed link, no file
 
@@ -280,22 +388,13 @@ def test_photographer_deletion_concludes_the_request(env, db, engine):
     assert req.status == m.RemovalStatus.DELETED_BY_PHOTOGRAPHER and req.contact_email is None
 
 
-def test_removal_by_the_downloaded_file_needs_no_search(env, db, engine):
-    """RF022 note 6 / RF023 note 1: someone who appears incidentally and never searched can
-    still ask for removal by sending the file — but only an exact copy identifies the image."""
-    storage, outbox = env
-    owner = photographer(db)
-    e = make_event(db, owner)
-    (group_id,) = publish_and_index(db, storage, engine, owner, e, [GROUP])
-    delivered = storage.get(db.get(m.Image, group_id).object_key)        # what "Baixar" gives the visitor
-    c = TestClient(app)                                                   # no consent, no search
-    send = lambda data: c.post("/api/v1/public/removal", data={"contact_email": "terceiro@exemplo.com"},
-                               files={"file": ("foto.jpg", data, "image/jpeg")})
-    r = send(GROUP)                                                       # the photographer's original: not the same file
-    assert r.status_code == 400 and r.json()["detail"]["reason"] == "not_found"
-    assert send(delivered).status_code == 200
-    assert db.get(m.Image, group_id).removal_requested_at is not None
-    assert send(delivered).json()["detail"]["reason"] == "already_requested"   # no second deadline
+def test_no_public_route_receives_a_file_for_removal(env, db, engine):
+    """Removal by sending the downloaded file was dropped (16/10/2026): removal is asked from the
+    photo itself, in the search result, which pins the exact image. A public route that accepts
+    files nobody uses would only be attack surface (LGPD Art. 46) — it must not come back unnoticed."""
+    r = TestClient(app).post("/api/v1/public/removal", data={"contact_email": "terceiro@exemplo.com"},
+                             files={"file": ("foto.jpg", GROUP, "image/jpeg")})
+    assert r.status_code in (404, 405)
 
 
 def test_several_themes_combined(env, db, engine):
@@ -331,29 +430,13 @@ def test_leaving_the_event_erases_the_result(env, db, engine):
     assert db.scalar(select(func.count()).select_from(m.VisitorSession).where(m.VisitorSession.event_id == e.id)) == 0
 
 
-def test_removal_by_file_covers_every_copy_of_the_same_photo(env, db, engine):
-    """The same photo, same photographer, in two events = the same delivered file. Asking by
-    file removes both copies (found while testing: only one was taken, sometimes the wrong one)."""
-    storage, _ = env
-    owner = photographer(db)
-    day1, day2 = make_event(db, owner, "Dia 1"), make_event(db, owner, "Dia 2")
-    (a,) = publish_and_index(db, storage, engine, owner, day1, [GROUP])
-    (b,) = publish_and_index(db, storage, engine, owner, day2, [GROUP])
-    delivered = storage.get(db.get(m.Image, a).object_key)
-    assert delivered == storage.get(db.get(m.Image, b).object_key)
-    r = TestClient(app).post("/api/v1/public/removal", data={"contact_email": "eu@exemplo.com"},
-                             files={"file": ("foto.jpg", delivered, "image/jpeg")})
-    assert r.status_code == 200
-    assert db.get(m.Image, a).removal_requested_at and db.get(m.Image, b).removal_requested_at
-
-
 def test_download_link_is_bound_to_session_image_and_time(env, db, engine):
     """RF019 note 7: signed, valid 15 min, bound to the session that asked, this image only.
     (Before, the link pointed straight to the storage and worked for anyone for 15 minutes.)"""
     storage, _ = env
     owner = photographer(db)
     e = make_event(db, owner)
-    a, b = publish_and_index(db, storage, engine, owner, e, [GROUP, cv2.imencode(".jpg", cv2.flip(insightface.data.get_image("t1"), 1))[1].tobytes()])
+    a, b = publish_and_index(db, storage, engine, owner, e, [GROUP, cv2.imencode(".jpg", cv2.flip(CREW, 1))[1].tobytes()])
     mine, other = TestClient(app), TestClient(app)
     for client in (mine, other):
         consent(client, e)

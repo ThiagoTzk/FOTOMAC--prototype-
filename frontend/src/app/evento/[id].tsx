@@ -1,22 +1,25 @@
 import { Image } from 'expo-image';
 import { useFocusEffect, useLocalSearchParams } from 'expo-router';
-import { Camera, ChevronDown, ChevronUp, Images } from 'lucide-react-native';
+import { CalendarClock, CalendarDays, Camera, ChevronDown, ChevronUp, Images, MapPin } from 'lucide-react-native';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import {
-  endVisit, failureReason, getPublicEvent, giveConsent, publicCoverUrl, searchFaces, type PublicEvent, type ResultItem,
+  endVisit, failureReason, getPublicEvent, giveConsent, publicCoverUrl, searchFaces, startCapture, type PublicEvent,
+  type ResultItem,
 } from '@/api/public';
-import { CameraCapture } from '@/components/visitor/Camera';
+import { ThemeIcon } from '@/components/icons/themeIcons';
+import { GuidedCapture, type Step } from '@/components/capture/GuidedCapture';
 import { ConsentModal } from '@/components/visitor/ConsentModal';
 import { Meta } from '@/components/visitor/EventCard';
 import { VisitorHeader } from '@/components/visitor/Header';
 import { PhotoViewer } from '@/components/visitor/PhotoViewer';
-import { pickPhoto, toJpeg } from '@/components/visitor/photo';
 import { RemovalModal } from '@/components/visitor/Removal';
 import { Results } from '@/components/visitor/Results';
-import { SearchCard, type Source } from '@/components/visitor/SearchCard';
-import { Column, eventDate, Note, ResponsibleUse, ThemePills, vtext } from '@/components/visitor/ui';
+import { SearchCard } from '@/components/visitor/SearchCard';
+import { SearchTips } from '@/components/visitor/SearchTips';
+import { Column, eventDate, Note, ResponsibleUse, ThemePills, useWide, vtext } from '@/components/visitor/ui';
+import { PageBand, web, WebPage, Wrap } from '@/components/visitor/web/Site';
 import { poppins, visitor } from '@/theme/tokens';
 
 /**
@@ -42,6 +45,8 @@ export default function EventPage() {
   const consentAnswer = useRef<((ok: boolean) => void) | null>(null);
   const scroll = useRef<ScrollView>(null);
   const resultsY = useRef(0);
+  const resultsBox = useRef<View>(null);
+  const wide = useWide();
 
   useEffect(() => {
     getPublicEvent(id).then(setEvent).catch((e) => setNotFound(e.status === 404 ? 'Evento não encontrado ou não está mais disponível.' : e.message));
@@ -74,7 +79,7 @@ export default function EventPage() {
     return () => window.removeEventListener('pagehide', endVisit);
   }, []);
 
-  // The selfie preview exists only in this page's memory; it is released when leaving.
+  // The preview of the frontal frame exists only in this page's memory; it is released when leaving.
   useEffect(() => () => { if (selfie) URL.revokeObjectURL(selfie); }, [selfie]);
 
   function askConsent() {
@@ -87,24 +92,40 @@ export default function EventPage() {
     consentAnswer.current = null;
   }
 
-  function pick(source: Source) {
+  function openCapture() {
     setSearchError(null);
-    if (source === 'camera') return setCameraOpen(true);
-    pickPhoto()
-      .then((file) => (file ? toJpeg(file) : null))
-      .then((jpeg) => jpeg && search(jpeg))
-      .catch((e) => setSearchError(e.message));
+    setCameraOpen(true);
   }
 
-  async function search(photo: Blob) {
+  /** The order of the movements comes from the server, asked when "Começar" is pressed (RF036). */
+  async function getOrder(): Promise<Step[]> {
+    try {
+      return (await startCapture(id)).order;
+    } catch (e) {
+      if (failureReason(e) === 'consent_required') {  // the visit expired: close and ask the consent again
+        setConsented(false);
+        setCameraOpen(false);
+        setSearchError(e instanceof Error ? e.message : 'Confirme o aviso de permissão novamente.');
+      }
+      throw e;
+    }
+  }
+
+  async function search(frames: Blob[], steps: Step[]) {
     setCameraOpen(false);
     setBusy(true);
     setSearchError(null);
-    setSelfie(URL.createObjectURL(photo));
+    const front = frames[steps.indexOf('frente')];
+    setSelfie(front ? URL.createObjectURL(front) : null);
     try {
-      const r = await searchFaces(id, photo);
+      const r = await searchFaces(id, frames, steps);
       setResults(r.items);
-      setTimeout(() => scroll.current?.scrollTo({ y: Math.max(0, resultsY.current - 16), animated: true }), 50);
+      setTimeout(() => {
+        // Web layout: the results sit deep inside the page's bands, so the browser itself scrolls
+        // to them (a ScrollView offset would be relative to the wrong parent).
+        if (wide && Platform.OS === 'web') (resultsBox.current as unknown as HTMLElement | null)?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+        else scroll.current?.scrollTo({ y: Math.max(0, resultsY.current - 16), animated: true });
+      }, 50);
     } catch (e) {
       if (failureReason(e) === 'consent_required') setConsented(false); // session expired: ask again
       setSearchError(e instanceof Error ? e.message : 'Não foi possível concluir a busca.');
@@ -113,6 +134,14 @@ export default function EventPage() {
     }
   }
 
+  if (notFound && wide) {
+    return (
+      <WebPage>
+        <PageBand crumbs={[{ label: 'Eventos', href: '/explorar' }, { label: 'Evento' }]} title="Evento indisponível" />
+        <Wrap style={{ paddingVertical: 48 }}><Note tone="danger">{notFound}</Note></Wrap>
+      </WebPage>
+    );
+  }
   if (notFound) {
     return (
       <View style={styles.page}>
@@ -124,6 +153,81 @@ export default function EventPage() {
   if (!event) return <View style={[styles.page, { justifyContent: 'center' }]}><ActivityIndicator color={visitor.primary} /></View>;
 
   const longText = event.description.length > 220;
+  const photos = event.photos === 1 ? '1 foto' : `${event.photos} fotos`;
+  const until = event.expires_on.split('-').reverse().join('/');
+  const modals = (
+    <>
+      <ConsentModal visible={consentOpen} onClose={() => answerConsent(false)}
+                    onAccept={async () => { await giveConsent(id); setConsented(true); answerConsent(true); }} />
+      <GuidedCapture visible={cameraOpen} variant="search" getOrder={getOrder} aside={<SearchTips />}
+                     onClose={() => setCameraOpen(false)} onDone={search} />
+      <PhotoViewer items={results ?? []} index={viewer} eventName={event.name} eventDate={event.date_label} onIndex={setViewer}
+                   onRemove={(item) => { setViewer(null); setRemoving(item); }} />
+      <RemovalModal item={removing} fallbackDate={event.date_label} onClose={() => setRemoving(null)}
+                    onRemoved={(rid) => setResults((r) => r?.filter((x) => x.id !== rid) ?? null)} />
+    </>
+  );
+
+  if (wide) {
+    return (
+      <WebPage scrollRef={scroll}>
+        <PageBand crumbs={[{ label: 'Eventos', href: '/explorar' }, { label: event.name }]}>
+          <View style={styles.webEvent}>
+            {/* The cover is the only photo of the event shown before a search (RF013 note 2). */}
+            <View style={styles.webCover}>
+              <Image source={publicCoverUrl(event.id)} style={StyleSheet.absoluteFill} contentFit="cover" accessible={false} />
+            </View>
+            <View style={{ flex: 1, gap: 14 }}>
+              <Text style={styles.webName} accessibilityRole="header">{event.name}</Text>
+              {event.themes.length > 0 && (
+                <View style={styles.chips}>
+                  {event.themes.map((t) => (
+                    <View key={t.id} style={styles.webTheme}>
+                      <ThemeIcon name={t.icon} size={15} color={web.yellow} strokeWidth={1.8} absoluteStrokeWidth />
+                      <Text style={styles.webThemeText}>{t.name}</Text>
+                    </View>
+                  ))}
+                </View>
+              )}
+              <View style={{ gap: 8 }}>
+                <WebMeta icon={CalendarDays} text={eventDate(event)} />
+                <WebMeta icon={MapPin} text={event.location} />
+                <WebMeta icon={Images} text={photos} />
+                {/* RF014 note 3: who covered the event, and the institution. */}
+                <WebMeta icon={Camera} text={`${event.credits.join(', ')} — CESMAC`} />
+                {/* RF022 note 5: the retention actually practised, from the event's own expiry date. */}
+                <WebMeta icon={CalendarClock} text={`Fotos disponíveis até ${until}`} />
+              </View>
+            </View>
+          </View>
+        </PageBand>
+        <Wrap style={{ paddingVertical: 48, gap: 32 }}>
+          <View style={styles.webRow}>
+            <View style={{ flex: 1, gap: 16, maxWidth: 560 }}>
+              <SearchCard consented={consented} askConsent={askConsent} onStart={openCapture} busy={busy} />
+              {searchError && <Note tone="danger">{searchError}</Note>}
+            </View>
+            <View style={{ flex: 1, gap: 16 }}>
+              {!!event.description && (
+                <View style={styles.webAbout}>
+                  <Text style={vtext.h3}>Sobre o evento</Text>
+                  <Text style={[styles.description, { fontSize: 14, lineHeight: 23 }]}>{event.description}</Text>
+                </View>
+              )}
+              {results === null && <ResponsibleUse />}
+            </View>
+          </View>
+          {results !== null && (
+            <View ref={resultsBox} style={{ scrollMarginTop: 24 } as object}>
+              <Results items={results} selfie={selfie} onOpen={setViewer} />
+            </View>
+          )}
+        </Wrap>
+        {modals}
+      </WebPage>
+    );
+  }
+
   return (
     <ScrollView ref={scroll} style={styles.page} contentContainerStyle={{ paddingBottom: 48 }}>
       <VisitorHeader back="/" />
@@ -143,7 +247,7 @@ export default function EventPage() {
           <View style={styles.chips}>
             <View style={styles.chip}>
               <Images size={16} color={visitor.heading} strokeWidth={1.6} absoluteStrokeWidth />
-              <Text style={styles.chipText}>{event.photos === 1 ? '1 foto' : `${event.photos} fotos`}</Text>
+              <Text style={styles.chipText}>{photos}</Text>
             </View>
             {/* RF014 note 3: who covered the event, and the institution. */}
             <View style={styles.chip}>
@@ -165,12 +269,12 @@ export default function EventPage() {
             </View>
           )}
           {/* RF022 note 5: the retention actually practised, from the event's own expiry date. */}
-          <Text style={vtext.small}>Fotos disponíveis até {event.expires_on.split('-').reverse().join('/')}.</Text>
+          <Text style={vtext.small}>Fotos disponíveis até {until}.</Text>
         </Column>
       </View>
 
       <Column style={{ gap: 16, marginTop: 24 }}>
-        <SearchCard consented={consented} askConsent={askConsent} onPick={pick} busy={busy} />
+        <SearchCard consented={consented} askConsent={askConsent} onStart={openCapture} busy={busy} />
         {searchError && <Note tone="danger">{searchError}</Note>}
         {results === null && <ResponsibleUse />}
         {results !== null && (
@@ -180,14 +284,17 @@ export default function EventPage() {
         )}
       </Column>
 
-      <ConsentModal visible={consentOpen} onClose={() => answerConsent(false)}
-                    onAccept={async () => { await giveConsent(id); setConsented(true); answerConsent(true); }} />
-      <CameraCapture visible={cameraOpen} onClose={() => setCameraOpen(false)} onCapture={search} />
-      <PhotoViewer items={results ?? []} index={viewer} eventName={event.name} eventDate={event.date_label} onIndex={setViewer}
-                   onRemove={(item) => { setViewer(null); setRemoving(item); }} />
-      <RemovalModal item={removing} fallbackDate={event.date_label} onClose={() => setRemoving(null)}
-                    onRemoved={(rid) => setResults((r) => r?.filter((x) => x.id !== rid) ?? null)} />
+      {modals}
     </ScrollView>
+  );
+}
+
+function WebMeta({ icon: Icon, text }: { icon: typeof Camera; text: string }) {
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+      <Icon size={18} color={web.yellow} strokeWidth={1.7} absoluteStrokeWidth />
+      <Text style={styles.webMeta}>{text}</Text>
+    </View>
   );
 }
 
@@ -201,5 +308,15 @@ const styles = StyleSheet.create({
           backgroundColor: visitor.chip },
   chipText: { fontFamily: poppins.regular, fontSize: 12, color: visitor.muted },
   about: { fontFamily: poppins.semiBold, fontSize: 13, color: visitor.text },
+  webEvent: { flexDirection: 'row', gap: 40, alignItems: 'center', marginTop: 24 },
+  webCover: { width: 440, aspectRatio: 16 / 11, borderRadius: 16, overflow: 'hidden', backgroundColor: 'rgba(255,255,255,0.12)',
+              boxShadow: '0px 16px 40px rgba(0,0,0,0.25)' },
+  webName: { fontFamily: poppins.bold, fontSize: 34, lineHeight: 42, color: '#FFFFFF' },
+  webTheme: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 5, paddingHorizontal: 12, borderRadius: 999,
+              backgroundColor: 'rgba(255,255,255,0.12)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.18)' },
+  webThemeText: { fontFamily: poppins.medium, fontSize: 13, color: '#FFFFFF' },
+  webMeta: { flex: 1, fontFamily: poppins.regular, fontSize: 15, color: 'rgba(255,255,255,0.9)' },
+  webRow: { flexDirection: 'row', gap: 32, alignItems: 'flex-start', zIndex: 5 },
+  webAbout: { backgroundColor: visitor.surface, borderRadius: 12, padding: 20, gap: 8, boxShadow: visitor.cardShadow },
   description: { fontFamily: poppins.regular, fontSize: 12, lineHeight: 18, color: visitor.muted, textAlign: 'justify' },
 });

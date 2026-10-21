@@ -1,9 +1,11 @@
 import { router, useFocusEffect } from 'expo-router';
-import { CalendarDays, CircleCheck, Images, Info, LoaderCircle, TriangleAlert, type LucideIcon } from 'lucide-react-native';
+import { CalendarDays, CircleCheck, Clock, Images, Info, LoaderCircle, ScanFace, Trash2, TriangleAlert, type LucideIcon } from 'lucide-react-native';
 import { useCallback, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { getDashboard, listEvents, type Dashboard, type EventFilters as Filters, type EventItem } from '@/api/events';
+import {
+  getDashboard, getNotifications, listEvents, type Dashboard, type EventFilters as Filters, type EventItem, type PanelNotice,
+} from '@/api/events';
 import { useAuth } from '@/auth/AuthContext';
 import { EventFilters } from '@/components/panel/EventFilters';
 import { EventsTable } from '@/components/panel/EventsTable';
@@ -25,21 +27,24 @@ function Indicator({ label, value, icon: Icon, bg, fg }: { label: string; value:
   );
 }
 
-function hoursLeft(requestedAt: string) {
-  // RF023: automatic deletion 72 h after the request, whatever the photographer does.
-  const ms = new Date(requestedAt).getTime() + 72 * 3600 * 1000 - Date.now();
-  return Math.max(0, Math.round(ms / 3600 / 1000));
-}
+const NOTICE_ICON: Record<PanelNotice['tone'], LucideIcon> = { danger: TriangleAlert, warning: Clock, info: Info };
 
 /** Figma "01 — Visão geral". */
 export default function OverviewScreen() {
   const { account } = useAuth();
   const [data, setData] = useState<Dashboard | null>(null);
-  const [filters, setFilters] = useState<Filters>({ scope: 'mine' });
+  const contractor = account?.role === 'contractor';
+  const admin = account?.role === 'admin';
+  // A hired photographer owns no event: it sees the one it was hired for (RF031). The administrator
+  // looks after the whole system, so its overview lists every event (D2, 17/10/2026).
+  const [filters, setFilters] = useState<Filters>({ scope: contractor || admin ? 'all' : 'mine' });
   const [events, setEvents] = useState<EventItem[] | null>(null);
+  const [notices, setNotices] = useState<PanelNotice[] | null>(null);
 
   useFocusEffect(useCallback(() => {
     getDashboard().then(setData).catch(() => undefined);
+    // Same source as the header bell: the two never disagree.
+    getNotifications().then((r) => setNotices(r.items)).catch(() => setNotices([]));
   }, []));
   useFocusEffect(useCallback(() => {
     listEvents(filters).then((p) => setEvents(p.items.slice(0, 5))).catch(() => setEvents([]));
@@ -49,17 +54,33 @@ export default function OverviewScreen() {
   return (
     <>
       <PageHeader title={`Olá, ${firstName}!`} subtitle="Acompanhe seus eventos e fotografias."
-                  actions={<Button label="+ Novo evento" onPress={() => router.navigate('/eventos/novo')} />} />
+                  actions={!contractor ? <Button label="+ Novo evento" onPress={() => router.navigate('/eventos/novo')} /> : undefined} />
+      {contractor && account?.valid_until && (
+        <Notice tone="warning" icon={Clock}
+                title={`Conta temporária: vale até ${new Date(account.valid_until).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })}`}
+                description="Envie as fotos da cobertura para o evento abaixo. Elas são publicadas depois da aprovação da administração, sempre com o seu crédito. Ao vencer o prazo, o acesso termina automaticamente."
+                actionLabel={account.bound_event_id ? 'Abrir o evento' : undefined}
+                onAction={account.bound_event_id ? () => router.navigate(`/eventos/${account.bound_event_id}`) : undefined} />
+      )}
 
-      <View style={styles.indicators}>
-        <Indicator label="Meus eventos" value={data?.events_owned ?? 0} icon={CalendarDays} bg={panel.primarySoft} fg={panel.primary} />
-        <Indicator label="Em processamento" value={data?.processing ?? 0} icon={LoaderCircle} bg={panel.primarySoft} fg={panel.primary} />
-        <Indicator label="Requer atenção" value={data?.attention ?? 0} icon={TriangleAlert} bg={panel.dangerSoft} fg={panel.danger} />
-        <Indicator label="Fotos publicadas" value={data?.photos_published ?? 0} icon={Images} bg={panel.successSoft} fg={panel.success} />
-      </View>
+      {admin ? (
+        <View style={styles.indicators}>
+          <Indicator label="Eventos ativos" value={data?.active_events ?? 0} icon={CalendarDays} bg={panel.primarySoft} fg={panel.primary} />
+          <Indicator label="Aguardando aprovação" value={data?.approvals_total ?? 0} icon={Clock} bg={panel.warningSoft} fg={panel.warning} />
+          <Indicator label="Remoções pendentes" value={data?.removal_requests ?? 0} icon={Trash2} bg={panel.dangerSoft} fg={panel.danger} />
+          <Indicator label="Falhas no reconhecimento" value={data?.indexing_failures ?? 0} icon={ScanFace} bg={panel.dangerSoft} fg={panel.danger} />
+        </View>
+      ) : (
+        <View style={styles.indicators}>
+          <Indicator label="Meus eventos" value={data?.events_owned ?? 0} icon={CalendarDays} bg={panel.primarySoft} fg={panel.primary} />
+          <Indicator label="Em processamento" value={data?.processing ?? 0} icon={LoaderCircle} bg={panel.primarySoft} fg={panel.primary} />
+          <Indicator label="Requer atenção" value={data?.attention ?? 0} icon={TriangleAlert} bg={panel.dangerSoft} fg={panel.danger} />
+          <Indicator label="Imagens publicadas" value={data?.photos_published ?? 0} icon={Images} bg={panel.successSoft} fg={panel.success} />
+        </View>
+      )}
 
       <Card style={{ zIndex: 10 }}>
-        <SectionTitle title="Meus eventos" action={
+        <SectionTitle title={admin ? 'Eventos recentes' : 'Meus eventos'} action={
           <Pressable accessibilityRole="link" onPress={() => router.navigate('/eventos')}>
             <Text style={styles.link}>Ver todos</Text>
           </Pressable>} />
@@ -67,30 +88,23 @@ export default function OverviewScreen() {
         {events && events.length > 0 && <EventsTable events={events} />}
         {events && events.length === 0 && (
           <Text style={styles.empty}>
-            {Object.values(filters).some((v) => v && v !== 'mine')
+            {Object.values(filters).some((v) => v && v !== 'mine' && v !== 'all')
               ? 'Nenhum evento encontrado com esses filtros.'
-              : 'Você ainda não cadastrou eventos. Comece pelo botão “+ Novo evento”.'}
+              : admin ? 'Nenhum evento cadastrado ainda.' : 'Você ainda não cadastrou eventos. Comece pelo botão “+ Novo evento”.'}
           </Text>
         )}
       </Card>
 
       <Card padding={18} style={{ gap: 12 }}>
-        <SectionTitle title="Requer atenção" />
+        <SectionTitle title="Avisos e pendências" />
         <View style={styles.attention}>
-          {data && data.indexing_failures > 0 && (
-            <Notice tone="warning" icon={Info} style={styles.attentionItem}
-                    title={`${data.indexing_failures} ${data.indexing_failures === 1 ? 'falha' : 'falhas'} de processamento`}
-                    description="Reprocessamento disponível." />
-          )}
-          {data && data.removal_requests > 0 && data.oldest_removal_request && (
-            // Adaptation to v1.6 (RF023): deletion is AUTOMATIC in 72 h — not a "response deadline".
-            <Notice tone="danger" icon={TriangleAlert} style={styles.attentionItem}
-                    title={`${data.removal_requests} ${data.removal_requests === 1 ? 'solicitação' : 'solicitações'} de remoção`}
-                    description={`Exclusão automática em ${hoursLeft(data.oldest_removal_request)} h.`} />
-          )}
-          {data && data.attention === 0 && (
+          {notices?.map((n, k) => (
+            <Notice key={`${n.kind}-${k}`} tone={n.tone} icon={NOTICE_ICON[n.tone]} style={styles.attentionItem}
+                    title={n.title} description={n.description} actionLabel="Abrir" onAction={() => router.navigate(n.href as never)} />
+          ))}
+          {notices && notices.length === 0 && (
             <Notice tone="success" icon={CircleCheck} style={styles.attentionItem} title="Nenhuma pendência"
-                    description="Falhas de processamento e pedidos de remoção aparecerão aqui." />
+                    description="Pedidos de remoção, imagens a aprovar ou publicar, falhas e prazos aparecerão aqui." />
           )}
         </View>
       </Card>

@@ -4,6 +4,7 @@ import { useCallback, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { listEvents, type EventFilters as Filters, type EventPage } from '@/api/events';
+import { useAuth } from '@/auth/AuthContext';
 import { EventFilters } from '@/components/panel/EventFilters';
 import { EventsTable } from '@/components/panel/EventsTable';
 import { PageHeader } from '@/components/panel/PageHeader';
@@ -12,6 +13,7 @@ import { fonts, panel } from '@/theme/tokens';
 
 /** Figma "02 — Lista de eventos" (with its empty-result variation). */
 export default function EventsScreen() {
+  const { account } = useAuth();
   const [filters, setFilters] = useState<Filters>({ scope: 'all', page: 1 });
   const [data, setData] = useState<EventPage | null>(null);
 
@@ -24,7 +26,8 @@ export default function EventsScreen() {
   return (
     <>
       <PageHeader title="Eventos" subtitle="Gerencie os eventos e seus respectivos acervos fotográficos."
-                  actions={<Button label="+ Novo evento" onPress={() => router.navigate('/eventos/novo')} />} />
+                  actions={account?.role !== 'contractor'  // a temporary account does not create events (RF031)
+                    ? <Button label="+ Novo evento" onPress={() => router.navigate('/eventos/novo')} /> : undefined} />
       <Card style={{ zIndex: 10 }}>
         <EventFilters value={filters} onChange={setFilters} />
         {!data && <ActivityIndicator color={panel.primary} />}

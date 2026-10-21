@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
@@ -17,7 +17,7 @@ from app import audit
 from app.auth import passwords
 from app.auth.tokens import new_token, token_hash
 from app.config import get_settings
-from app.db.models import (Account, AccountRole, AccountStatus, PasswordToken, PasswordTokenPurpose,
+from app.db.models import (AUTHOR_ROLES, Account, AccountRole, AccountStatus, PasswordToken, PasswordTokenPurpose,
                            Session as LoginSession)
 from app.notifications.port import EmailMessage, EmailSender
 
@@ -94,7 +94,15 @@ def account_for_session(db: Session, token: str | None) -> Account | None:
         LoginSession.expires_at > _now()))
     if row is None or row.account.status != AccountStatus.ACTIVE:
         return None
-    return row.account
+    account = row.account
+    # A temporary account stops working the moment its 24 h end, even mid-session (RF031 note 4).
+    if account.role == AccountRole.CONTRACTOR and account.valid_until and account.valid_until <= _now():
+        account.status = AccountStatus.EXPIRED
+        _revoke_all_sessions(db, account.id)
+        audit.record(db, "account.expired", None, "account", account.id)
+        db.commit()
+        return None
+    return account
 
 
 def logout(db: Session, token: str | None) -> None:
@@ -148,7 +156,8 @@ def send_activation_link(db: Session, account: Account, sender: EmailSender) -> 
 def request_password_reset(db: Session, email: str, sender: EmailSender) -> None:
     """Always "succeeds" from the caller's point of view (RF002 note 1)."""
     account = db.scalar(select(Account).where(func.lower(Account.email) == email.strip().lower()))
-    if account is None or account.status != AccountStatus.ACTIVE:
+    # RF002 note 6: no self-service recovery for a temporary account; the administrator issues a new link.
+    if account is None or account.status != AccountStatus.ACTIVE or account.role == AccountRole.CONTRACTOR:
         return
     settings = get_settings()
     token = _issue_link(db, account, PasswordTokenPurpose.RESET)
@@ -198,9 +207,43 @@ def _set_password(db: Session, token: str, purpose: PasswordTokenPurpose,
     return account
 
 
-def activate_account(db: Session, token: str, password: str, confirmation: str) -> LoginResult:
-    """First access: defines the password, "Acesso Pendente" → "Ativa" (RF001 note 6)."""
-    account = _set_password(db, token, PasswordTokenPurpose.ACTIVATION, password, confirmation)
+def activation_info(db: Session, token: str) -> dict:
+    """What the first-access screen needs before asking anything: is the link valid, and must the
+    holder identify themselves (temporary account, RF031 note 6)?"""
+    link = _valid_link(db, token, PasswordTokenPurpose.ACTIVATION)
+    if link is None or link.account.status != AccountStatus.PENDING:
+        return {"valid": False, "needs_identity": False, "full_name": None}
+    contractor = link.account.role == AccountRole.CONTRACTOR
+    return {"valid": True, "needs_identity": contractor, "full_name": link.account.full_name if contractor else None}
+
+
+def activate_account(db: Session, token: str, password: str, confirmation: str,
+                     cpf: str | None = None, birth_date: date | None = None) -> LoginResult:
+    """First access: defines the password, "Acesso Pendente" → "Ativa" (RF001 note 6). A hired
+    photographer also informs CPF and birth date, and the 24 h start now (RF031 notes 2 and 6)."""
+    from app.accounts import identity  # local: identity → events.service → … would import this module
+    from app.events.service import EventError
+
+    link = _valid_link(db, token, PasswordTokenPurpose.ACTIVATION)
+    contractor = link is not None and link.account.role == AccountRole.CONTRACTOR
+    encrypted = None
+    if contractor:
+        try:
+            digits, born = identity.clean_cpf(cpf or ""), identity.clean_birth_date(birth_date)
+            # Encrypted BEFORE the password is set: the database refuses an active contractor
+            # without identification, and the query below would flush a half-done account.
+            encrypted = identity.encrypt(db, digits), identity.encrypt(db, born.isoformat())
+        except EventError as exc:
+            raise AuthError(str(exc)) from None
+    # No autoflush in between: setting the password ends the old sessions with a query, which would
+    # write the account as "active" before its identification is in place (the database refuses it).
+    with db.no_autoflush:
+        account = _set_password(db, token, PasswordTokenPurpose.ACTIVATION, password, confirmation)
+        if encrypted:
+            account.cpf_encrypted, account.birth_date_encrypted = encrypted
+            account.valid_until = _now() + timedelta(hours=24)
+    if encrypted:
+        audit.record(db, "account.contractor_identified", account.id, "account", account.id)
     audit.record(db, "auth.account_activated", account.id, "account", account.id)
     session_token = new_token()
     db.add(LoginSession(token_hash=token_hash(session_token), account_id=account.id,
@@ -221,8 +264,8 @@ def update_signature(db: Session, account: Account, signature: str) -> Account:
     """RF001 note 4: the photographer may change the professional name used as credit.
     Only the name is stored; "— Centro Universitário CESMAC" is added when displayed."""
     signature = signature.strip()
-    if account.role != AccountRole.PHOTOGRAPHER:
-        raise AuthError("Somente contas de fotógrafo possuem assinatura.")
+    if account.role not in AUTHOR_ROLES:
+        raise AuthError("Somente contas que enviam fotos possuem assinatura.")
     if not signature or len(signature) > 80:
         raise AuthError("Informe a assinatura (até 80 caracteres).")
     if signature != account.photographer_signature:

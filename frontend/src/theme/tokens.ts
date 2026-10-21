@@ -98,8 +98,12 @@ export const visitor = {
   headerShadow: '0px 4px 12px 2px rgba(0, 0, 0, 0.08)',
   cardShadow: '0px 0px 12px rgba(0, 0, 0, 0.12)',
   menuShadow: '0px 0px 6px rgba(0, 0, 0, 0.20)',
-  /** Width of the content column on large screens. */
+  /** Width of the content column on phones/tablets — and of reading pages (privacy, removal). */
   column: 760,
+  /** On a computer the visitor area is a WEB page, not a stretched phone screen (feedback of the
+   *  1st committee): from this window width on, the column widens. Phones keep the Figma layout. */
+  wideFrom: 1024,
+  columnWide: 1200,
 } as const;
 
 export const poppins = {

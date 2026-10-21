@@ -34,7 +34,6 @@ function RootStack() {
       <Stack.Screen name="explorar" options={{ title: 'Eventos — FOTOMAC' }} />
       <Stack.Screen name="evento/[id]" options={{ title: 'Evento — FOTOMAC' }} />
       <Stack.Screen name="privacidade" options={{ title: 'Política de Privacidade — FOTOMAC' }} />
-      <Stack.Screen name="remocao" options={{ title: 'Solicitar remoção — FOTOMAC' }} />
       {/* Staff entry. Someone already logged in is sent to the panel (see each screen). */}
       <Stack.Screen name="login" options={{ title: 'Entrar — FOTOMAC' }} />
       <Stack.Screen name="recuperar-senha" options={{ title: 'Recuperar senha — FOTOMAC' }} />
@@ -43,6 +42,8 @@ function RootStack() {
       {/* Reached from e-mail links: open whether or not someone is logged in. */}
       <Stack.Screen name="redefinir-senha" options={{ title: 'Definir nova senha — FOTOMAC' }} />
       <Stack.Screen name="primeiro-acesso" options={{ title: 'Primeiro acesso — FOTOMAC' }} />
+      <Stack.Screen name="autorizacao/index" options={{ title: 'Autorização de uso de imagem — FOTOMAC' }} />
+      <Stack.Screen name="autorizacao/revogar" options={{ title: 'Revogar autorização — FOTOMAC' }} />
     </Stack>
   );
 }

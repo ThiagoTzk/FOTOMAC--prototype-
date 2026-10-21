@@ -24,3 +24,4 @@ def decode_image(data: bytes) -> np.ndarray:
     if image is None:
         raise InvalidImageError("Não foi possível ler a imagem. Envie um arquivo JPEG válido.")
     return image
+

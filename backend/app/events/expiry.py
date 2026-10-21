@@ -59,6 +59,16 @@ def expire_due(db: Session, storage: ObjectStorage, sender: EmailSender, today: 
 
 
 def expire_event(db: Session, storage: ObjectStorage, sender: EmailSender, event: Event) -> None:
+    counts = eliminate_collection(db, storage, sender, event)
+    event.cover_object_key = None
+    event.collaboration_open = False
+    event.status = EventStatus.EXPIRED  # irreversible: nothing ever sets it back
+    audit.record(db, "event.expired", None, "event", event.id, **counts)
+    db.commit()
+
+
+def eliminate_collection(db: Session, storage: ObjectStorage, sender: EmailSender, event: Event) -> dict:
+    """Every photo, reduced copy, cover, package and face vector of the event — files first."""
     from app.public.service import conclude_removals
 
     images = db.scalars(select(Image).where(Image.event_id == event.id)).all()
@@ -68,7 +78,7 @@ def expire_event(db: Session, storage: ObjectStorage, sender: EmailSender, event
     # database untouched and the next run simply tries again — never an orphan file.
     keys = [event.cover_object_key]
     for image in images:
-        keys += [image.object_key, image.thumb_key, image.preview_key]
+        keys += image.storage_keys
     packages = db.scalars(select(PackageJob).where(PackageJob.event_id == event.id)).all()
     keys += [p.object_key for p in packages]
     for key in filter(None, keys):
@@ -81,8 +91,4 @@ def expire_event(db: Session, storage: ObjectStorage, sender: EmailSender, event
     for p in packages:
         p.status, p.object_key = PackageStatus.EXPIRED, None
     db.query(VisitorSession).filter(VisitorSession.event_id == event.id).delete()
-    event.cover_object_key = None
-    event.collaboration_open = False
-    event.status = EventStatus.EXPIRED  # irreversible: nothing ever sets it back
-    audit.record(db, "event.expired", None, "event", event.id, images=len(images), vectors=vectors, files=files)
-    db.commit()
+    return {"images": len(images), "vectors": vectors, "files": files}

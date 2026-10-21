@@ -9,6 +9,9 @@ infra/seaweedfs/*.pid
 # Local photo samples used for manual tests (may contain faces)
 backend/samples/
 
+# Facial recognition model files (38 MB): downloaded and checked by infra/setup_local.sh
+backend/models/*.onnx
+
 # Python
 .venv/
 __pycache__/
@@ -32,3 +35,6 @@ e2e-screenshots/
 
 # macOS
 .DS_Store
+
+# Design mockups: real event covers show people (LGPD — never versioned)
+docs/design/**/capa-*.jpg

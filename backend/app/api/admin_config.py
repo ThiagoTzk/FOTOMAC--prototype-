@@ -1,5 +1,5 @@
-"""ADMINISTRATOR routes: facial-recognition parameters (RF026), event themes (RF027) and
-re-indexing (RF028). Every route requires an active administrator session (RF002 note 4).
+"""ADMINISTRATOR routes: facial-recognition engine and parameters (RF026), event themes (RF027)
+and re-indexing (RF028). Every route requires an active administrator session (RF002 note 4).
 """
 from __future__ import annotations
 
@@ -17,8 +17,9 @@ from app.api.deps import require_role
 from app.db.models import Account, AccountRole, Event, EventStatus, ReindexJob, ReindexScope
 from app.db.session import get_session
 from app.events.service import EventError, NotFound, PermissionDenied
-from app.face.factory import get_face_engine
-from app.face.port import FaceEngine
+from app.face import factory
+from app.face import switch as engine_switch
+from app.face.port import FaceEngineUnavailable
 from app.indexing import reindex
 from app.themes import service as themes
 
@@ -34,26 +35,33 @@ def _http(exc: Exception) -> HTTPException:
 
 # ------------------------------------------------------------------ parameters (RF026)
 
-def _parameters_out(db: Session, engine: FaceEngine) -> dict:
+def _model_out(db: Session) -> dict:
+    """The engine in use (works even when it is broken) and how many photos still wait for it."""
+    status_ = factory.engine_status(db)
+    return {**status_, "outdated_images": reindex.outdated_count(db, status_["version"])}
+
+
+def _parameters_out(db: Session) -> dict:
     values = parameters.all_values(db)
     names = {a.id: a.full_name for a in db.scalars(select(Account))}
+    labels = {k: s.label for k, s in parameters.SPECS.items()} | {factory.ACTIVE_KEY: "Modelo de reconhecimento"}
     return {
-        "items": [{"key": k, "label": s.label, "value": values[k], "default": s.default, "minimum": s.minimum,
-                   "maximum": s.maximum, "step": s.step, "unit": s.unit, "group": s.group, "help": s.help,
-                   "integer": s.integer} for k, s in parameters.SPECS.items()],
-        # Read-only (note 3): replacing the model means re-indexing (RF028).
-        "model": {"version": engine.model_version, "vector_dim": engine.vector_dim},
-        "history": [{"at": h.occurred_at, "key": h.target_id, "label": parameters.SPECS[h.target_id].label
-                     if h.target_id in parameters.SPECS else h.target_id,
+        "items": [{"key": k, "label": s.label, "value": values[k], "default": parameters.default(db, k),
+                   "minimum": s.minimum, "maximum": s.maximum, "step": s.step, "unit": s.unit, "group": s.group,
+                   "help": s.help, "integer": s.integer,
+                   "choices": [list(c) for c in s.choices] if s.choices else None} for k, s in parameters.SPECS.items()],
+        # The engine is chosen in its own card (PUT /admin/face-engine): a swap re-indexes (RF028).
+        "model": _model_out(db),
+        "engines": factory.catalogue(),
+        "history": [{"at": h.occurred_at, "key": h.target_id, "label": labels.get(h.target_id, h.target_id),
                      "previous": h.details.get("previous"), "new": h.details.get("new"),
                      "by": names.get(h.actor_account_id, "conta removida")} for h in parameters.history(db)],
     }
 
 
 @router.get("/parameters")
-def get_parameters(_: Account = Depends(admin_only), db: Session = Depends(get_session),
-                   engine: FaceEngine = Depends(get_face_engine)):
-    return _parameters_out(db, engine)
+def get_parameters(_: Account = Depends(admin_only), db: Session = Depends(get_session)):
+    return _parameters_out(db)
 
 
 @router.get("/parameters/retention-impact")
@@ -70,14 +78,29 @@ class ParametersIn(BaseModel):
 
 
 @router.put("/parameters")
-def update_parameters(body: ParametersIn, admin: Account = Depends(admin_only), db: Session = Depends(get_session),
-                      engine: FaceEngine = Depends(get_face_engine)):
+def update_parameters(body: ParametersIn, admin: Account = Depends(admin_only), db: Session = Depends(get_session)):
     try:
         changed = parameters.update(db, admin, body.values, body.threshold_warning_acknowledged)
     except parameters.ParameterError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from None
     public.apply_limits(db)
-    return {"changed": changed, **_parameters_out(db, engine)}
+    return {"changed": changed, **_parameters_out(db)}
+
+
+class EngineIn(BaseModel):
+    engine: str = Field(max_length=40)
+    consequences_acknowledged: bool = False
+
+
+@router.put("/face-engine")
+def switch_face_engine(body: EngineIn, admin: Account = Depends(admin_only), db: Session = Depends(get_session)):
+    """Swaps the facial recognition engine (built by app/face/factory.py) and queues the
+    re-indexing of the published collection with it."""
+    try:
+        job = engine_switch.switch(db, admin, body.engine, body.consequences_acknowledged)
+    except engine_switch.EngineSwitchError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from None
+    return {"job": _job(db, job) if job else None, **_parameters_out(db)}
 
 
 # ------------------------------------------------------------------ themes (RF027)
@@ -85,12 +108,14 @@ def update_parameters(body: ParametersIn, admin: Account = Depends(admin_only), 
 class ThemeRow(BaseModel):
     id: int
     name: str
+    icon: str
     active: bool
     events: int
 
 
 class ThemeIn(BaseModel):
     name: str = Field(max_length=200)
+    icon: str | None = Field(None, max_length=40)
 
 
 class ThemeStatusIn(BaseModel):
@@ -99,29 +124,29 @@ class ThemeStatusIn(BaseModel):
 
 @router.get("/themes", response_model=list[ThemeRow])
 def list_themes(_: Account = Depends(admin_only), db: Session = Depends(get_session)):
-    return [ThemeRow(id=t.id, name=t.name, active=t.active, events=n) for t, n in themes.list_with_counts(db)]
+    return [ThemeRow(id=t.id, name=t.name, icon=t.icon, active=t.active, events=n) for t, n in themes.list_with_counts(db)]
 
 
 @router.post("/themes", response_model=ThemeRow, status_code=status.HTTP_201_CREATED)
 def create_theme(body: ThemeIn, admin: Account = Depends(admin_only), db: Session = Depends(get_session)):
     try:
-        t = themes.create(db, admin, body.name)
+        t = themes.create(db, admin, body.name, body.icon)
     except EventError as exc:
         raise _http(exc) from None
-    return ThemeRow(id=t.id, name=t.name, active=t.active, events=0)
+    return ThemeRow(id=t.id, name=t.name, icon=t.icon, active=t.active, events=0)
 
 
 def _row(db: Session, theme_id: int) -> ThemeRow:
     for t, n in themes.list_with_counts(db):
         if t.id == theme_id:
-            return ThemeRow(id=t.id, name=t.name, active=t.active, events=n)
+            return ThemeRow(id=t.id, name=t.name, icon=t.icon, active=t.active, events=n)
     raise HTTPException(status.HTTP_404_NOT_FOUND, "Tema não encontrado.")
 
 
 @router.put("/themes/{theme_id}", response_model=ThemeRow)
 def rename_theme(theme_id: int, body: ThemeIn, admin: Account = Depends(admin_only), db: Session = Depends(get_session)):
     try:
-        themes.rename(db, admin, theme_id, body.name)
+        themes.rename(db, admin, theme_id, body.name, body.icon)
     except EventError as exc:
         raise _http(exc) from None
     return _row(db, theme_id)
@@ -174,12 +199,11 @@ def _job(db: Session, job: ReindexJob) -> JobOut:
 
 
 @router.get("/reindex")
-def reindex_overview(_: Account = Depends(admin_only), db: Session = Depends(get_session),
-                     engine: FaceEngine = Depends(get_face_engine)):
+def reindex_overview(_: Account = Depends(admin_only), db: Session = Depends(get_session)):
     jobs = db.scalars(select(ReindexJob).order_by(ReindexJob.created_at.desc()).limit(20)).all()
     events = db.scalars(select(Event).where(Event.status.in_([EventStatus.PUBLISHED, EventStatus.PROCESSING]))
                         .order_by(Event.date_start.desc())).all()
-    return {"model": {"version": engine.model_version, "vector_dim": engine.vector_dim},
+    return {"model": _model_out(db),
             "versions": reindex.model_versions(db),
             "events": [{"id": e.id, "name": e.name} for e in events],
             "jobs": [_job(db, j) for j in jobs]}
@@ -192,12 +216,13 @@ class ReindexIn(BaseModel):
 
 
 @router.post("/reindex", response_model=JobOut, status_code=status.HTTP_202_ACCEPTED)
-def request_reindex(body: ReindexIn, admin: Account = Depends(admin_only), db: Session = Depends(get_session),
-                    engine: FaceEngine = Depends(get_face_engine)):
+def request_reindex(body: ReindexIn, admin: Account = Depends(admin_only), db: Session = Depends(get_session)):
     try:
-        job = reindex.request(db, admin, engine, body.scope, body.event_id, body.from_version)
+        job = reindex.request(db, admin, factory.active_engine(db), body.scope, body.event_id, body.from_version)
     except EventError as exc:
         raise _http(exc) from None
+    except FaceEngineUnavailable as exc:  # the administrator sees the real reason
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from None
     return _job(db, job)
 
 

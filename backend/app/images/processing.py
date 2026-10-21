@@ -1,7 +1,9 @@
 """What happens to each photo file when it arrives (RF007) — independent of HTTP and DB.
 
-- the ORIGINAL keeps its compressed image data byte for byte (RF007 note 9): only the EXIF
-  block changes (GPS removed, credits written);
+- a JPEG keeps its compressed image data byte for byte (RF007 note 9): only the metadata
+  changes (GPS removed, credits and the ownership notice written);
+- PNG, WebP, HEIC and camera RAW (RF007 note 13) are kept as received, cleaned by ExifTool, and get
+  a high-quality JPEG COPY that the screens, the facial indexing and the downloads use;
 - two REDUCED copies (thumbnail and preview) are generated for the screens (RF018 note 2).
 """
 from __future__ import annotations
@@ -14,9 +16,12 @@ import cv2
 import numpy as np
 import piexif
 
-from app.imaging import is_jpeg
+from app.config import get_settings
+from app.images import exiftool, formats
 
-MAX_BYTES = 25 * 1024 * 1024        # RF007
+MB = 1024 * 1024
+MAX_BYTES = 25 * MB                 # RF007: photo
+JPEG_COPY_QUALITY = 95              # the copy of a non-JPEG photo: high quality (RF007 note 13)
 THUMB_SIDE = 480                    # grid cards (150 px wide, sharp on retina screens)
 PREVIEW_SIDE = 1600                 # viewer (RF018 note 2: resolution adequate to the screen)
 INSTITUTION = "Centro Universitário CESMAC"
@@ -32,16 +37,30 @@ class FileRejected(Exception):
 
 @dataclass
 class PreparedImage:
-    original: bytes
+    original: bytes            # the JPEG of work: a JPEG upload itself, or the copy of another format
     thumb: bytes
     preview: bytes
     width: int
     height: int
+    source: bytes | None = None      # the original in another format, cleaned (RF007 note 9)
+    source_ext: str | None = None
+    kind: str = formats.JPEG
 
 
 def credit_line(signature: str) -> str:
     """The credit format of v1.6 (RF018 note 3)."""
     return f"Fotografia por: {signature} — {INSTITUTION}"
+
+
+def ownership_notice(signature: str) -> str:
+    """RF019 note 6: who holds the rights and who took the photo, written in the file itself.
+    Provisional text: the final one is validated by marketing and the legal area (section 11)."""
+    return f"Imagem do acervo do {INSTITUTION} — Fotografia: {signature}"
+
+
+def origin_address() -> str:
+    """The "endereço de origem" of RF019 note 6: the FOTOMAC site."""
+    return get_settings().frontend_url
 
 
 def jpeg_dimensions(data: bytes) -> tuple[int, int] | None:
@@ -62,56 +81,94 @@ def jpeg_dimensions(data: bytes) -> tuple[int, int] | None:
     return None
 
 
-def _with_metadata(jpeg: bytes, signature: str) -> bytes:
-    """GPS removed (RF007 note 11) and credits written (RF019 note 6), image data untouched."""
+def with_metadata(jpeg: bytes, signature: str) -> bytes:
+    """GPS removed (RF007 note 11); credits and the ownership notice written in EXIF, XMP and IPTC
+    (RF019 note 6). The image data is untouched."""
     try:
         exif = piexif.load(jpeg)
     except Exception:
         exif = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}, "thumbnail": None}
     exif["GPS"] = {}
     exif["1st"], exif["thumbnail"] = {}, None
-    credit = credit_line(signature)
+    notice = ownership_notice(signature)
     exif["0th"][piexif.ImageIFD.Artist] = signature.encode("utf-8")
-    exif["0th"][piexif.ImageIFD.Copyright] = credit.encode("utf-8")
-    # Windows shows XPAuthor (UTF-16) in the file properties, accents included.
+    exif["0th"][piexif.ImageIFD.Copyright] = notice.encode("utf-8")
+    exif["0th"][piexif.ImageIFD.ImageDescription] = notice.encode("utf-8")
+    # Windows shows XPAuthor/XPComment (UTF-16) in the file properties, accents included.
     exif["0th"][piexif.ImageIFD.XPAuthor] = tuple((signature + "\0").encode("utf-16-le"))
+    exif["0th"][piexif.ImageIFD.XPComment] = tuple((notice + "\0").encode("utf-16-le"))
     out = io.BytesIO()
     piexif.insert(piexif.dump(exif), jpeg, out)
-    return _with_xmp(out.getvalue(), signature, credit)
+    return _with_segments(out.getvalue(), [_xmp_segment(signature, notice), _iptc_segment(signature, notice)])
 
 
 def _xml(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def _with_xmp(jpeg: bytes, signature: str, credit: str) -> bytes:
-    """Same credits as an XMP block (dc:creator / dc:rights), the format the macOS Finder,
-    Spotlight and photo editors read. Inserted as one more APP1 segment right after the EXIF
-    one: the compressed image data is not touched."""
+def _xmp_segment(signature: str, notice: str) -> bytes:
+    """The same data as XMP — the format the macOS Finder, Spotlight and photo editors read."""
     xmp = ('<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
            '<rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/" '
-           'xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/">'
+           'xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/" xmlns:xmpRights="http://ns.adobe.com/xap/1.0/rights/">'
            f'<dc:creator><rdf:Seq><rdf:li>{_xml(signature)}</rdf:li></rdf:Seq></dc:creator>'
-           f'<dc:rights><rdf:Alt><rdf:li xml:lang="x-default">{_xml(credit)}</rdf:li></rdf:Alt></dc:rights>'
+           f'<dc:rights><rdf:Alt><rdf:li xml:lang="x-default">{_xml(notice)}</rdf:li></rdf:Alt></dc:rights>'
+           f'<dc:description><rdf:Alt><rdf:li xml:lang="x-default">{_xml(notice)}</rdf:li></rdf:Alt></dc:description>'
            f'<photoshop:Credit>{_xml(INSTITUTION)}</photoshop:Credit>'
+           f'<xmpRights:Marked>True</xmpRights:Marked><xmpRights:WebStatement>{_xml(origin_address())}</xmpRights:WebStatement>'
            '</rdf:Description></rdf:RDF></x:xmpmeta>').encode("utf-8")
-    payload = b"http://ns.adobe.com/xap/1.0/\x00" + xmp
-    segment = b"\xff\xe1" + struct.pack(">H", len(payload) + 2) + payload
-    # Drop any XMP the camera wrote (it could carry its own GPS), keep everything else.
+    payload = _XMP_HEADER + xmp
+    return b"\xff\xe1" + struct.pack(">H", len(payload) + 2) + payload
+
+
+def _iim(record: int, dataset: int, value: bytes) -> bytes:
+    return bytes([0x1C, record, dataset]) + struct.pack(">H", len(value)) + value
+
+
+def _utf8(text: str, limit: int) -> bytes:
+    """Cut at the IPTC field limit without splitting an accented letter in half."""
+    return text.encode("utf-8")[:limit].decode("utf-8", "ignore").encode("utf-8")
+
+
+def _iptc_segment(signature: str, notice: str) -> bytes:
+    """IPTC (the APP13 block news agencies and Windows read): by-line, credit, copyright, caption."""
+    iim = (_iim(1, 90, b"\x1b%G")                      # coded character set: UTF-8
+           + _iim(2, 0, b"\x00\x04")                    # record version
+           + _iim(2, 80, _utf8(signature, 32))          # by-line (author)
+           + _iim(2, 110, _utf8(INSTITUTION, 32))       # credit
+           + _iim(2, 116, _utf8(notice, 128))           # copyright notice
+           + _iim(2, 120, _utf8(notice, 2000)))         # caption / description
+    if len(iim) % 2:
+        iim += b"\x00"
+    resource = b"8BIM" + struct.pack(">H", 0x0404) + b"\x00\x00" + struct.pack(">I", len(iim)) + iim
+    payload = _IPTC_HEADER + resource
+    return b"\xff\xed" + struct.pack(">H", len(payload) + 2) + payload
+
+
+_XMP_HEADER = b"http://ns.adobe.com/xap/1.0/\x00"
+_IPTC_HEADER = b"Photoshop 3.0\x00"
+
+
+def _with_segments(jpeg: bytes, segments: list[bytes]) -> bytes:
+    """Our XMP and IPTC blocks right after the EXIF one. The camera's XMP and IPTC are dropped (they
+    can carry a GPS position or the name of a place); everything else is kept and the compressed
+    image data is not touched."""
+    block = b"".join(segments)
     i, out = 2, bytearray(jpeg[:2])
     inserted = False
     while i + 4 <= len(jpeg) and jpeg[i] == 0xFF and jpeg[i + 1] != 0xDA:
         length = struct.unpack(">H", jpeg[i + 2:i + 4])[0]
         chunk = jpeg[i:i + 2 + length]
-        is_xmp = jpeg[i + 1] == 0xE1 and chunk[4:33] == b"http://ns.adobe.com/xap/1.0/\x00"
-        if not is_xmp:
+        is_xmp = jpeg[i + 1] == 0xE1 and chunk[4:4 + len(_XMP_HEADER)] == _XMP_HEADER
+        is_iptc = jpeg[i + 1] == 0xED and chunk[4:4 + len(_IPTC_HEADER)] == _IPTC_HEADER
+        if not (is_xmp or is_iptc):
             out += chunk
         if jpeg[i + 1] == 0xE1 and chunk[4:10] == b"Exif\x00\x00" and not inserted:
-            out += segment
+            out += block
             inserted = True
         i += 2 + length
     if not inserted:
-        out = bytearray(jpeg[:2]) + segment + out[2:]
+        out = bytearray(jpeg[:2]) + block + out[2:]
     return bytes(out + jpeg[i:])
 
 
@@ -126,12 +183,29 @@ def _reduced(image: np.ndarray, side: int) -> bytes:
     return buf.tobytes()
 
 
-def prepare(data: bytes, signature: str) -> PreparedImage:
-    """Validates and prepares one uploaded file. Raises FileRejected with the RF008 cause."""
-    if len(data) > MAX_BYTES:
+FORMAT_MESSAGE = "Formato não permitido: envie fotografias em JPEG, PNG, HEIC ou WebP."
+
+
+def prepare(data: bytes, signature: str, filename: str = "", raw_max_bytes: int | None = None) -> PreparedImage:
+    """Validates and prepares one uploaded file. Raises FileRejected with the RF008 cause.
+
+    raw_max_bytes is None while the administrator has camera RAW formats disabled (RF026)."""
+    found = formats.detect(data, filename)  # binary signature, not the extension (RF007 note 2)
+    if found is None:
+        raise FileRejected("format", FORMAT_MESSAGE)
+    kind, ext = found
+    if kind == formats.RAW and raw_max_bytes is None:
+        raise FileRejected("raw_disabled", "Formatos brutos (RAW) não estão habilitados. Envie a fotografia exportada em JPEG.")
+    if kind == formats.RAW and len(data) > raw_max_bytes:
+        raise FileRejected("raw_too_large", f"O arquivo ultrapassa o limite de {raw_max_bytes // MB} MB por arquivo RAW.")
+    if kind != formats.RAW and len(data) > MAX_BYTES:
         raise FileRejected("too_large", "O arquivo ultrapassa o limite de 25 MB por imagem.")
-    if not is_jpeg(data):  # binary signature, not the extension (RF007 note 2)
-        raise FileRejected("format", "Formato não permitido: envie apenas imagens JPEG.")
+    if kind == formats.JPEG:
+        return _prepare_jpeg(data, signature)
+    return _prepare_other(data, kind, ext, signature)
+
+
+def _prepare_jpeg(data: bytes, signature: str) -> PreparedImage:
     dims = jpeg_dimensions(data)
     if dims is None:
         raise FileRejected("corrupted", "O arquivo está corrompido e não pôde ser lido.")
@@ -145,5 +219,28 @@ def prepare(data: bytes, signature: str) -> PreparedImage:
     decoded = cv2.imdecode(np.frombuffer(data, np.uint8), flag)
     if decoded is None:
         raise FileRejected("corrupted", "O arquivo está corrompido e não pôde ser lido.")
-    return PreparedImage(original=_with_metadata(data, signature), thumb=_reduced(decoded, THUMB_SIDE),
+    return PreparedImage(original=with_metadata(data, signature), thumb=_reduced(decoded, THUMB_SIDE),
                          preview=_reduced(decoded, PREVIEW_SIDE), width=dims[0], height=dims[1])
+
+
+def _prepare_other(data: bytes, kind: str, ext: str, signature: str) -> PreparedImage:
+    """PNG, WebP, HEIC or RAW: the original is kept as received (cleaned) and gets a JPEG copy."""
+    if not exiftool.available():  # fail closed: never store an original that still has its GPS
+        raise FileRejected("format_unavailable",
+                           f"Este servidor ainda não recebe fotografias em {formats.LABELS[kind]}. Envie em JPEG.")
+    try:
+        pixels = formats.decode(data, kind)
+    except formats.UnreadableImage:
+        raise FileRejected("corrupted", "O arquivo está corrompido e não pôde ser lido.") from None
+    ok, buf = cv2.imencode(".jpg", pixels, [cv2.IMWRITE_JPEG_QUALITY, JPEG_COPY_QUALITY])
+    if not ok:
+        raise FileRejected("corrupted", "O arquivo está corrompido e não pôde ser lido.")
+    try:
+        copy = exiftool.copy_capture_tags(data, ext, buf.tobytes())
+        source = exiftool.clean_original(data, ext, signature, ownership_notice(signature), INSTITUTION, origin_address())
+    except exiftool.ExifToolUnavailable:
+        raise FileRejected("corrupted", "O arquivo está corrompido e não pôde ser lido.") from None
+    h, w = pixels.shape[:2]
+    return PreparedImage(original=with_metadata(copy, signature), thumb=_reduced(pixels, THUMB_SIDE),
+                         preview=_reduced(pixels, PREVIEW_SIDE), width=w, height=h,
+                         source=source, source_ext=ext, kind=kind)

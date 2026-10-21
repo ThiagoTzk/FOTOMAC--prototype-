@@ -64,8 +64,9 @@ export default function ProfileScreen() {
   const [changing, setChanging] = useState(false);
 
   if (!account) return null;
-  const photographer = account.role === 'photographer';
-  const role = photographer ? 'Fotógrafo' : 'Administrador';
+  // Every profile that sends photos signs them (credit, RF001 note 4): photographer, marketing, hired photographer.
+  const photographer = account.role !== 'admin';
+  const role = account.role_label;
 
   async function save() {
     setError(null); setSaved(null); setSaving(true);

@@ -10,7 +10,7 @@ import { fonts, panel } from '@/theme/tokens';
  * the drag events, which React Native's <View> does not expose — this is why it lives in a
  * .web.tsx file (Expo picks it automatically on the web; the app uses Dropzone.tsx).
  */
-export function Dropzone({ onFiles }: { onFiles: (files: File[]) => void }) {
+export function Dropzone({ onFiles, accept = 'image/jpeg,.jpg,.jpeg' }: { onFiles: (files: File[]) => void; accept?: string }) {
   const input = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
   return (
@@ -24,7 +24,7 @@ export function Dropzone({ onFiles }: { onFiles: (files: File[]) => void }) {
         <Text style={styles.title}>Arraste suas fotos aqui</Text>
         <Text style={styles.hint}>ou selecione os arquivos do computador</Text>
         <Button variant="secondary" label="Selecionar arquivos" onPress={() => input.current?.click()} />
-        <input ref={input} type="file" multiple accept="image/jpeg,.jpg,.jpeg" aria-label="Selecionar arquivos"
+        <input ref={input} type="file" multiple accept={accept} aria-label="Selecionar arquivos"
                style={{ display: 'none' }}
                onChange={(e) => { onFiles(Array.from(e.target.files ?? [])); e.target.value = ''; }} />
       </View>

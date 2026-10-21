@@ -8,7 +8,6 @@ import zipfile
 from datetime import date, datetime, timedelta, timezone
 
 import cv2
-import insightface.data
 import piexif
 import pytest
 from fastapi.testclient import TestClient
@@ -98,7 +97,9 @@ def test_upload_stores_original_with_credit_and_without_gps(api, owner, event, s
 
 
 @pytest.mark.parametrize("data,reason", [
-    (b"\x89PNG\r\n\x1a\n" + b"0" * 100, "format"),
+    (b"GIF89a" + b"0" * 100, "format"),                     # not an accepted format (RF007)
+    (b"II*\x00" + b"0" * 100, "format"),                    # a plain TIFF named .jpg: not a camera RAW
+    (b"\x89PNG\r\n\x1a\n" + b"0" * 100, "corrupted"),       # PNG signature, but no image inside
     (b"\xff\xd8\xff\xe0" + b"garbage" * 50, "corrupted"),
     (b"\xff\xd8\xff" + b"0" * (25 * 1024 * 1024), "too_large"),
 ])
@@ -200,18 +201,18 @@ def test_failures_retry_three_times_then_fail_without_stopping_the_queue(api, db
     assert event.status == m.EventStatus.PUBLISHED                    # the event is not stuck
 
 
-def test_real_insightface_indexes_the_group_photo(api, db, owner, event):
-    """End to end with the REAL model (via the real SeaweedFS-free path): 6 faces → 6 vectors."""
+def test_real_engine_indexes_the_group_photo(api, db, owner, event, group_photo_bgr):
+    """End to end with the REAL model (YuNet + SFace, via the SeaweedFS-free path): 3 faces → 3 vectors."""
     storage = MemoryStorage()
     app.dependency_overrides[get_storage] = lambda: storage
     c = api(owner)
-    photo = cv2.imencode(".jpg", insightface.data.get_image("t1"))[1].tobytes()
+    photo = cv2.imencode(".jpg", group_photo_bgr)[1].tobytes()
     upload(c, event, photo)
     c.post(f"/api/v1/events/{event.id}/publish")
-    assert index_next(db, storage, build_engine("insightface"))
+    assert index_next(db, storage, build_engine("sface"))
     image = images_of(db, event)[0]
-    assert image.indexing_status == m.ImageIndexingStatus.PROCESSED and image.faces_count == 6
-    assert image.indexing_model_version.startswith("insightface-1.0.1/buffalo_l")
+    assert image.indexing_status == m.ImageIndexingStatus.PROCESSED and image.faces_count == 3
+    assert image.indexing_model_version == "opencv-5.0.0/yunet-2023mar+sface-2021dec/teste1"
 
 
 def test_deleting_a_published_image_removes_files_and_vectors(api, db, owner, event, storage):
@@ -291,3 +292,17 @@ def test_full_package_and_collaborator_package(api, db, owner, event, storage):
     assert c_owner.get(f"/api/v1/packages/{full['id']}/download?t={old}").status_code == 403   # expired
     actions = db.scalars(select(m.AuditLog.action).where(m.AuditLog.action.like("package.%"))).all()
     assert actions.count("package.request") == 2 and "package.download" in actions   # RF012 note 6
+
+
+def test_publishing_only_the_selected_images(api, db, owner, event, storage):
+    """17/10/2026: in the Images tab the responsible selects what to publish; the rest stays under review."""
+    c = api(owner)
+    ids = [c.post(f"/api/v1/events/{event.id}/images", files={"file": (f"{n}.jpg", jpeg(n), "image/jpeg")}).json()["id"]
+           for n in (61, 62, 63)]
+    assert c.get(f"/api/v1/events/{event.id}/images").json()["counts"]["ready"] == 3
+    r = c.post(f"/api/v1/events/{event.id}/publish", json={"ids": ids[:2]})
+    assert r.status_code == 200 and r.json()["published"] == 2
+    status = {i["id"]: i["review_status"] for i in c.get(f"/api/v1/events/{event.id}/images").json()["items"]}
+    assert status == {ids[0]: "published", ids[1]: "published", ids[2]: "in_review"}
+    assert c.post(f"/api/v1/events/{event.id}/publish", json={"ids": ids[:2]}).status_code == 400   # already published
+    assert c.post(f"/api/v1/events/{event.id}/publish", json={"ids": [ids[2]]}).json()["published"] == 1

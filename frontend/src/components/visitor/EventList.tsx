@@ -40,14 +40,15 @@ type Props = { items: PublicEvent[]; loading: boolean; error: string | null; mor
 
 export function EventList({ items, loading, error, more, empty }: Props) {
   const { width } = useWindowDimensions();
-  const two = width >= 760;
+  // One card per row on phones, two on tablets, three on a computer.
+  const perRow = width >= 1100 ? 3 : width >= 760 ? 2 : 1;
   if (error) return <Note tone="danger">{error}</Note>;
   if (!items.length && loading) return <ActivityIndicator color={visitor.primary} style={{ marginTop: 24 }} />;
   if (!items.length) return <Text style={[vtext.body, styles.empty]}>{empty}</Text>;
   return (
     <View style={{ gap: 20 }}>
       <View style={styles.grid}>
-        {items.map((e) => <View key={e.id} style={{ width: two ? '50%' : '100%', padding: 6 }}><EventCard event={e} /></View>)}
+        {items.map((e) => <View key={e.id} style={{ width: `${100 / perRow}%`, padding: 6 }}><EventCard event={e} /></View>)}
       </View>
       {more && <View style={{ alignItems: 'center' }}><VButton label="Carregar mais eventos" variant="ghost" onPress={more} loading={loading} /></View>}
     </View>

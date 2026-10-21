@@ -22,7 +22,7 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 
 from app import audit  # noqa: E402
 from app.auth import service  # noqa: E402
-from app.db.models import Account, AccountRole  # noqa: E402
+from app.db.models import AUTHOR_ROLES, Account, AccountRole  # noqa: E402
 from app.db.session import get_engine  # noqa: E402
 from app.notifications.factory import get_email_sender  # noqa: E402
 
@@ -38,8 +38,15 @@ def main() -> int:
     if len(args.name.split()) < 2:
         print("O nome completo deve ter no mínimo duas palavras (RF001).")
         return 1
-    if args.role == AccountRole.PHOTOGRAPHER.value and not args.signature:
-        print("Conta de fotógrafo exige --signature (RF001 nota 4).")
+    if args.role == AccountRole.CONTRACTOR.value:
+        print("A conta temporária do fotógrafo contratado exige evento e contrato: crie pelo painel (Contas › Nova conta).")
+        return 1
+    from app.accounts.service import INSTITUTIONAL_DOMAIN, is_institutional
+    if not is_institutional(args.email.strip()):
+        print(f"Use o e-mail institucional (@{INSTITUTIONAL_DOMAIN}): só o fotógrafo contratado usa e-mail pessoal.")
+        return 1
+    if AccountRole(args.role) in AUTHOR_ROLES and not args.signature:
+        print("Quem envia fotos (fotógrafo, marketing) precisa de --signature (RF001 nota 4).")
         return 1
 
     db = sessionmaker(bind=get_engine())()

@@ -1,22 +1,26 @@
-import { CircleCheck, Cpu, History, RefreshCw, TriangleAlert } from 'lucide-react-native';
+import { CircleCheck, Cpu, History, RefreshCw, Repeat, TriangleAlert } from 'lucide-react-native';
 import { useCallback, useEffect, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
 import {
-  getParameters, getReindex, requestReindex, retentionImpact, saveParameters,
+  getParameters, getReindex, requestReindex, retentionImpact, saveParameters, switchEngine,
   type Parameter, type Parameters, type ReindexOverview, type ReindexScope,
 } from '@/api/admin';
 import { Modal } from '@/components/panel/Modal';
+import { QualityTab } from '@/components/panel/QualityTest';
 import { PageHeader } from '@/components/panel/PageHeader';
 import { ProgressBar } from '@/components/panel/Progress';
 import { Select } from '@/components/panel/Select';
 import { Button, Card, Field, Input, Notice, SectionTitle, Tabs } from '@/components/panel/ui';
 import { fonts, panel } from '@/theme/tokens';
 
-type Tab = 'parametros' | 'reindexacao';
+type Tab = 'parametros' | 'reindexacao' | 'teste';
 
-/** Brazilian number format on screen ("0,30"); the API speaks plain numbers. */
-const show = (p: Parameter, v: number) => (p.integer ? String(v) : v.toFixed(2).replace('.', ','));
+/** Brazilian number format on screen ("0,3741", "0,50"); the API speaks plain numbers. Up to 4
+ *  decimals: the calibrated threshold of SFace (0,3741) must not show up rounded to "0,37". */
+const decimal = (v: number) => v.toFixed(4).replace(/0{1,2}$/, '').replace('.', ',');
+// A choice (e.g. the watermark corner) is shown by its name, never by the number behind it.
+const show = (p: Parameter, v: number) => p.choices?.find(([c]) => c === v)?.[1] ?? (p.integer ? String(v) : decimal(v));
 const parse = (text: string) => Number(text.replace(',', '.'));
 const when = (iso: string) => new Date(iso).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
 
@@ -24,18 +28,20 @@ const when = (iso: string) => new Date(iso).toLocaleString('pt-BR', { dateStyle:
 export default function RecognitionScreen() {
   const [tab, setTab] = useState<Tab>('parametros');
   return (
-    <View style={{ gap: 24, maxWidth: 1000 }}>
+    <View style={{ gap: 24, maxWidth: tab === 'teste' ? 1400 : 1000 }}>
       <PageHeader title="Reconhecimento facial"
-                  subtitle="Parâmetros que decidem quais fotos o visitante recebe, e a reindexação do acervo." />
-      <Tabs tabs={[{ key: 'parametros', label: 'Parâmetros' }, { key: 'reindexacao', label: 'Reindexação' }]} value={tab} onChange={setTab} />
-      {tab === 'parametros' ? <ParametersTab /> : <ReindexTab />}
+                  subtitle="Modelo, parâmetros que decidem quais fotos o visitante recebe, reindexação e o teste de precisão." />
+      <Tabs tabs={[{ key: 'parametros', label: 'Parâmetros' }, { key: 'reindexacao', label: 'Reindexação' }, { key: 'teste', label: 'Teste de precisão' }]}
+            value={tab} onChange={setTab} />
+      {tab === 'parametros' ? <ParametersTab onOpenReindex={() => setTab('reindexacao')} /> : tab === 'reindexacao' ? <ReindexTab />
+        : <QualityTab />}
     </View>
   );
 }
 
 // ------------------------------------------------------------------ parameters (RF026)
 
-function ParametersTab() {
+function ParametersTab({ onOpenReindex }: { onOpenReindex: () => void }) {
   const [data, setData] = useState<Parameters | null>(null);
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
@@ -46,7 +52,8 @@ function ParametersTab() {
 
   const fill = useCallback((d: Parameters) => {
     setData(d);
-    setDraft(Object.fromEntries(d.items.map((p) => [p.key, show(p, p.value)])));
+    // Choices keep the raw number in the draft; the list shows the name.
+    setDraft(Object.fromEntries(d.items.map((p) => [p.key, p.choices ? String(p.value) : show(p, p.value)])));
   }, []);
   useEffect(() => { getParameters().then(fill).catch((e) => setError(e.message)); }, [fill]);
 
@@ -90,16 +97,7 @@ function ParametersTab() {
     <View style={{ gap: 20 }}>
       {done && <Notice tone="success" icon={CircleCheck} title={done} />}
       {error && <Notice tone="danger" icon={TriangleAlert} title={error} />}
-      <Card padding={20}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-          <Cpu size={20} color={panel.primary} strokeWidth={1.6} absoluteStrokeWidth />
-          <View style={{ flex: 1 }}>
-            <Text style={styles.label}>Versão do modelo em uso</Text>
-            <Text style={styles.value}>{data.model.version} · vetor de {data.model.vector_dim} dimensões</Text>
-          </View>
-        </View>
-        <Text style={styles.help}>Somente leitura. Trocar o modelo exige reindexar o acervo (aba Reindexação).</Text>
-      </Card>
+      <EngineCard data={data} onSwitched={(r, message) => { fill(r); setError(null); setDone(message); }} onOpenReindex={onOpenReindex} />
       {groups.map((g) => (
         <Card key={g} padding={24}>
           <SectionTitle title={g} />
@@ -110,13 +108,21 @@ function ParametersTab() {
                 <Field key={p.key} label={p.label} style={styles.field}
                        error={bad ? `Entre ${show(p, p.minimum)} e ${show(p, p.maximum)}${p.integer ? ', número inteiro' : ''}.` : undefined}
                        help={`${p.help} Padrão: ${show(p, p.default)}${p.unit ? ` ${p.unit}` : ''}.`}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                    <View style={{ width: 140 }}>
-                      <Input value={draft[p.key]} onChangeText={(t) => setDraft((d) => ({ ...d, [p.key]: t }))} inputMode="decimal"
-                             invalid={bad} accessibilityLabel={p.label} />
+                  {p.choices ? (
+                    <View style={{ width: 260 }}>
+                      <Select placeholder={p.label} options={p.choices.map(([value, label]) => ({ value, label }))}
+                              value={parse(draft[p.key] ?? '')} accessibilityLabel={p.label}
+                              onChange={(v: number | null) => v !== null && setDraft((d) => ({ ...d, [p.key]: String(v) }))} />
                     </View>
-                    {!!p.unit && <Text style={styles.help}>{p.unit}</Text>}
-                  </View>
+                  ) : (
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                      <View style={{ width: 140 }}>
+                        <Input value={draft[p.key]} onChangeText={(t) => setDraft((d) => ({ ...d, [p.key]: t }))} inputMode="decimal"
+                               invalid={bad} accessibilityLabel={p.label} />
+                      </View>
+                      {!!p.unit && <Text style={styles.help}>{p.unit}</Text>}
+                    </View>
+                  )}
                 </Field>
               );
             })}
@@ -135,11 +141,14 @@ function ParametersTab() {
         {data.history.length === 0 ? <Text style={styles.help}>Nenhuma alteração até agora: todos os valores são os de fábrica.</Text>
           : data.history.map((h, i) => {
             const p = data.items.find((x) => x.key === h.key);
+            // Engine swaps carry engine keys; show their names.
+            const value = (v: number | string) => (typeof v === 'string' ? data.engines.find((e) => e.key === v)?.label ?? v
+              : p ? show(p, v) : String(v));
             return (
               <View key={i} style={styles.historyRow}>
                 <History size={16} color={panel.muted} strokeWidth={1.6} absoluteStrokeWidth />
                 <Text style={[styles.text, { flex: 1 }]}>
-                  <Text style={{ fontFamily: fonts.bold }}>{h.label}</Text>: {p ? show(p, h.previous) : h.previous} → {p ? show(p, h.new) : h.new}
+                  <Text style={{ fontFamily: fonts.bold }}>{h.label}</Text>: {value(h.previous)} → {value(h.new)}
                 </Text>
                 <Text style={styles.help}>{h.by} · {when(h.at)}</Text>
               </View>
@@ -156,7 +165,8 @@ function ParametersTab() {
           </Text>
           <Text style={styles.text}>
             A regra é privilegiar a precisão. Depois da mudança, as métricas de precisão e revocação precisam ser apuradas de
-            novo (RNF18). O valor padrão (0,30) foi calibrado no Teste 1.
+            novo (RNF18). O valor padrão ({data.model.calibrated_threshold !== null ? decimal(data.model.calibrated_threshold) : '—'}) é o
+            calibrado para o modelo em uso ({data.model.label}).
           </Text>
           <View style={styles.actions}>
             <Button variant="secondary" label="Cancelar" onPress={() => setWarnThreshold(false)} />
@@ -187,6 +197,97 @@ function ParametersTab() {
         )}
       </Modal>
     </View>
+  );
+}
+
+// ------------------------------------------------------------------ engine (builder: backend/app/face/factory.py)
+
+/**
+ * The facial recognition model in use and the swap to another one. The catalogue comes from the
+ * backend's builder; a model that does not load is refused by the server before anything changes.
+ */
+function EngineCard({ data, onSwitched, onOpenReindex }: {
+  data: Parameters; onSwitched: (r: Parameters, message: string) => void; onOpenReindex: () => void;
+}) {
+  const model = data.model;
+  const [choice, setChoice] = useState<string | null>(model.key);
+  const [confirm, setConfirm] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // InsightFace is only the yardstick of the quality test (licence): never offered as the engine in use.
+  const usable = data.engines.filter((e) => !e.reference_only);
+  const target = usable.find((e) => e.key === choice);
+  const only = usable.length < 2;
+
+  async function swap() {
+    if (!target) return;
+    setBusy(true); setError(null);
+    try {
+      const r = await switchEngine(target.key);
+      onSwitched(r, `Modelo trocado para ${target.label}. ${r.job ? `${r.job.total} foto(s) na fila de reindexação — acompanhe na aba Reindexação.` : 'Não há fotos publicadas para reindexar.'}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Não foi possível trocar o modelo.');
+    } finally {
+      setBusy(false);
+      setConfirm(false);
+    }
+  }
+
+  return (
+    <Card padding={24} style={{ zIndex: 5 }}>
+      <SectionTitle title="Modelo de reconhecimento" />
+      <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 12 }}>
+        <Cpu size={22} color={panel.primary} strokeWidth={1.6} absoluteStrokeWidth />
+        <View style={{ flex: 1, gap: 4 }}>
+          <Text style={styles.label}>{model.label}</Text>
+          <Text style={styles.value}>
+            {model.version ?? 'não carregado'}{model.vector_dim ? ` · vetor de ${model.vector_dim} dimensões` : ''}
+          </Text>
+          {!!model.license && <Text style={styles.help}>Licença: {model.license}</Text>}
+          {model.calibrated_threshold !== null && (
+            <Text style={styles.help}>Limiar calibrado: {decimal(model.calibrated_threshold)}. {model.calibration}</Text>
+          )}
+        </View>
+      </View>
+      {model.error && (
+        <Notice tone="danger" icon={TriangleAlert} title="O modelo não carregou — a busca dos visitantes está pausada."
+                description={`${model.error} O sistema nunca troca de modelo sozinho: escolha outro abaixo ou corrija a instalação.`} />
+      )}
+      {model.outdated_images > 0 && (
+        <Notice tone="warning" icon={RefreshCw}
+                title={`${model.outdated_images} foto(s) publicada(s) ainda estão com vetores de outro modelo e não aparecem na busca.`}
+                description="Elas voltam a aparecer depois de reindexadas com o modelo em uso." actionLabel="Abrir reindexação" onAction={onOpenReindex} />
+      )}
+      {error && <Notice tone="danger" icon={TriangleAlert} title={error} />}
+      <View style={[styles.form, { alignItems: 'flex-end', zIndex: 3 }]}>
+        <Field label="Trocar para" style={{ flex: 1, minWidth: 260 }}>
+          <Select placeholder="Modelo" options={usable.map((e) => ({ value: e.key, label: `${e.label} · ${e.vector_dim} dimensões` }))}
+                  value={choice} onChange={setChoice} accessibilityLabel="Modelo de reconhecimento" />
+        </Field>
+        <Button icon={Repeat} label="Trocar modelo" disabled={!target || target.key === model.key} onPress={() => setConfirm(true)} />
+      </View>
+      <Text style={styles.help}>
+        {only ? 'Só há um modelo instalado no sistema. Para oferecer outro, um desenvolvedor acrescenta o adaptador e uma linha no catálogo do builder (backend/app/face/factory.py); ele aparece aqui.'
+          : 'A troca reindexa todo o acervo publicado com o novo modelo. Antes de trocar, compare os modelos na aba Teste de precisão.'}
+      </Text>
+
+      <Modal visible={confirm} onClose={() => setConfirm(false)} icon={Repeat} tone="danger" title="Trocar o modelo de reconhecimento?">
+        {target && (
+          <View style={{ gap: 12 }}>
+            <Text style={styles.text}>De <Text style={{ fontFamily: fonts.bold }}>{model.label}</Text> para <Text style={{ fontFamily: fonts.bold }}>{target.label}</Text>. O que acontece:</Text>
+            <Text style={styles.text}>{'• O novo modelo é carregado e conferido antes; se não carregar, nada muda.\n'}
+              {'• Todas as fotos publicadas entram na fila de reindexação. Até cada uma ser reindexada, ela NÃO aparece na busca — vetores de modelos diferentes não se comparam.\n'}
+              {'• Os vetores faciais do modelo anterior são apagados assim que os novos existem.\n'}
+              {`• O limiar de similaridade volta ao valor calibrado do novo modelo (${decimal(target.similarity_threshold)}).\n`}
+              {'• A troca fica registrada com o seu nome.'}</Text>
+            <View style={styles.actions}>
+              <Button variant="secondary" label="Cancelar" onPress={() => setConfirm(false)} />
+              <Button variant="danger" label="Entendi, trocar modelo" loading={busy} onPress={swap} />
+            </View>
+          </View>
+        )}
+      </Modal>
+    </Card>
   );
 }
 
@@ -242,7 +343,7 @@ function ReindexTab() {
       <Card padding={24} style={{ zIndex: 10 }}>
         <SectionTitle title="Nova reindexação" />
         <Text style={styles.text}>
-          Gera de novo os vetores faciais das fotos publicadas com o modelo em uso ({data.model.version}) — por exemplo, depois de
+          Gera de novo os vetores faciais das fotos publicadas com o modelo em uso ({data.model.label}) — por exemplo, depois de
           trocar a tecnologia de reconhecimento. Roda numa fila própria, que só avança quando não há publicação esperando. Os
           vetores antigos só são apagados depois que os novos existem: as fotos continuam encontráveis durante todo o processo.
         </Text>

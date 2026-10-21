@@ -1,16 +1,16 @@
 import { Image } from 'expo-image';
 import { router, useLocalSearchParams } from 'expo-router';
-import { Info, ShieldAlert, TriangleAlert, X } from 'lucide-react-native';
+import { FileImage, Info, TriangleAlert, X } from 'lucide-react-native';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { getEvent, type EventItem } from '@/api/events';
-import { formatBytes } from '@/api/images';
+import { formatBytes, getUploadRules, type UploadRules } from '@/api/images';
 import { Dropzone } from '@/components/panel/Dropzone';
 import { PageHeader } from '@/components/panel/PageHeader';
 import { ProgressBar } from '@/components/panel/Progress';
 import { Button, Card, Notice, Pill, SectionTitle } from '@/components/panel/ui';
-import { MAX_FILES_PER_BATCH, newEntries, runQueue, validate, type Entry, type EntryStatus } from '@/components/panel/upload';
+import { MAX_FILES_PER_BATCH, newEntries, previewable, runQueue, validate, type Entry, type EntryStatus } from '@/components/panel/upload';
 import { fonts, panel } from '@/theme/tokens';
 
 const PILL: Record<EntryStatus, { label: string; bg: string; fg: string }> = {
@@ -28,7 +28,13 @@ function FileRow({ entry, sending, onRemove }: { entry: Entry; sending: boolean;
   const p = PILL[entry.status];
   return (
     <View style={styles.file}>
-      <Image source={{ uri: entry.previewUrl }} style={styles.thumb} contentFit="cover" />
+      {previewable(entry.kind) || !entry.kind ? <Image source={{ uri: entry.previewUrl }} style={styles.thumb} contentFit="cover" /> : (
+        // The browser cannot draw HEIC or RAW: the server makes the JPEG copy after the upload.
+        <View style={[styles.thumb, styles.noPreview]}>
+          <FileImage size={20} color={panel.muted} strokeWidth={1.6} absoluteStrokeWidth />
+          <Text style={styles.tiny}>{entry.kind === 'raw' ? 'RAW' : 'HEIC'}</Text>
+        </View>
+      )}
       <View style={{ width: 300, maxWidth: '40%', gap: 4 }}>
         <Text style={styles.fileName} numberOfLines={1}>{entry.file.name}</Text>
         <Text style={styles.small}>{formatBytes(entry.file.size)}</Text>
@@ -51,6 +57,12 @@ function FileRow({ entry, sending, onRemove }: { entry: Entry; sending: boolean;
   );
 }
 
+/** The file chooser's filter. Only a convenience: the type is checked by the signature, here and on the server. */
+function accept(rules: UploadRules): string {
+  const types = 'image/jpeg,.jpg,.jpeg,image/png,.png,image/webp,.webp,image/heic,image/heif,.heic,.heif';
+  return rules.raw_enabled ? `${types},${rules.raw_extensions.map((e) => `.${e}`).join(',')}` : types;
+}
+
 /** Figma "06 — Upload de imagens" and "07 — Acompanhamento do upload". */
 export default function UploadScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -59,10 +71,13 @@ export default function UploadScreen() {
   const [phase, setPhase] = useState<'select' | 'sending' | 'finished'>('select');
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [rules, setRules] = useState<UploadRules | null>(null);
   const files = useRef(new Map<string, File>());
   const cancelled = useRef(false);
 
   useEffect(() => { getEvent(id).then(setEvent).catch((e) => setError(e.message)); }, [id]);
+  // What is accepted now: RAW formats depend on the administrator (RF026).
+  useEffect(() => { getUploadRules().then(setRules).catch((e) => setError(e.message)); }, []);
   // Free the in-memory previews when leaving the screen.
   useEffect(() => () => entries.forEach((e) => URL.revokeObjectURL(e.previewUrl)), []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -79,6 +94,7 @@ export default function UploadScreen() {
   }, []);
 
   async function addFiles(selected: File[]) {
+    if (!rules) return;
     setError(null);
     const room = MAX_FILES_PER_BATCH - entries.length;
     if (selected.length > room) setError(`Máximo de ${MAX_FILES_PER_BATCH} arquivos por envio: ${selected.length - room} não foram incluídos.`);
@@ -87,7 +103,7 @@ export default function UploadScreen() {
     setEntries((list) => [...list, ...fresh]);
     setChecking(true);
     try {
-      const checked = await validate(id, fresh);
+      const checked = await validate(id, fresh, rules);
       setEntries((list) => list.map((e) => checked.find((c) => c.key === e.key) ?? e));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Não foi possível verificar os arquivos.');
@@ -110,9 +126,10 @@ export default function UploadScreen() {
   }
 
   if (error && !event) return <Notice tone="danger" icon={TriangleAlert} title="Evento indisponível" description={error} />;
-  if (!event) return <Card><ActivityIndicator color={panel.primary} /></Card>;
+  if (!event || !rules) return <Card><ActivityIndicator color={panel.primary} /></Card>;
 
   const valid = entries.filter((e) => e.status === 'valid');
+  const raws = valid.filter((e) => e.kind === 'raw');
   const sent = entries.filter((e) => e.status === 'done').length;
   const failed = entries.filter((e) => e.status === 'failed');
   const queue = entries.filter((e) => ['waiting', 'sending', 'done', 'failed'].includes(e.status));
@@ -158,8 +175,9 @@ export default function UploadScreen() {
                 <Text style={styles.big20}>{value}</Text>
               </View>
             ))}
-            <Button label="Conferir imagens" disabled={phase !== 'finished' || sent === 0}
-                    onPress={() => router.replace(`/eventos/${id}/conferencia`)} />
+            {/* D5 (17/10/2026): ends in the Imagens tab, on what was just sent, with "Publicar" at hand. */}
+            <Button label="Conferir e publicar" disabled={phase !== 'finished' || sent === 0}
+                    onPress={() => router.replace(`/eventos/${id}/imagens?filtro=in_review`)} />
           </View>
         </Card>
       </>
@@ -170,20 +188,24 @@ export default function UploadScreen() {
     <>
       <PageHeader crumbs={[{ label: 'Eventos', href: '/eventos' }, { label: event.name, href: `/eventos/${id}` }, { label: 'Enviar imagens' }]}
                   title="Enviar imagens" />
-      <Dropzone onFiles={addFiles} />
+      <Dropzone onFiles={addFiles} accept={accept(rules)} />
       <Card padding={16}>
         <View style={styles.rules}>
-          <Pill label="JPEG apenas" />
+          <Pill label={`${rules.formats.join(', ')}${rules.raw_enabled ? ' e RAW' : ''}`} />
           <Pill label="Máximo de 25 MB por imagem" bg={panel.page} fg={panel.muted} />
-          <Pill label="Máximo de 300 arquivos por envio" bg={panel.page} fg={panel.muted} />
+          {rules.raw_enabled && rules.max_raw_bytes && (
+            <Pill label={`RAW até ${Math.round(rules.max_raw_bytes / 1024 ** 2)} MB`} bg={panel.page} fg={panel.muted} />)}
+          <Pill label={`Máximo de ${MAX_FILES_PER_BATCH} arquivos por envio`} bg={panel.page} fg={panel.muted} />
           <Pill label="Máximo de 1.000 imagens por evento" bg={panel.page} fg={panel.muted} />
         </View>
       </Card>
-      {/* Adaptation to v1.6 (RF007 note 12): highlighted warning BEFORE every upload. The system does
-          not estimate ages; the check is human and the face must be suppressed IN the file. */}
-      <Notice tone="warning" icon={ShieldAlert} title="Antes de enviar: pessoas menores de 18 anos"
-              description="Confira se o conjunto contém imagens de pessoas menores de 18 anos. Nesses casos, suprima o rosto no próprio arquivo antes do envio — não basta esconder na tela. O sistema não estima idade." />
       {error && <Notice tone="danger" icon={TriangleAlert} title={error} />}
+      {/* 21/10/2026: RAW is free to send (nobody approves it); whoever sends is told the cost and decides. */}
+      {raws.length > 0 && (
+        <Notice tone="warning" icon={Info}
+                title={raws.length === 1 ? '1 arquivo RAW selecionado' : `${raws.length} arquivos RAW selecionados`}
+                description={`Arquivos RAW ocupam de 3 a 5 vezes o espaço de um JPEG (${formatBytes(raws.reduce((t, e) => t + e.file.size, 0))} nesta seleção) e demoram mais para enviar e processar; muitos de uma vez podem sobrecarregar o servidor. Além disso, o sistema revela o RAW com os ajustes padrão da câmera, sem a sua edição. Recomendado: enviar a fotografia editada e exportada em JPEG de alta qualidade (até 25 MB). Se preferir o RAW, o envio segue normalmente.`} />
+      )}
       {entries.length > 0 && (
         <Card padding={18} style={{ gap: 8 }}>
           <SectionTitle title={`Arquivos selecionados · ${entries.length}`} action={checking ? <ActivityIndicator color={panel.primary} /> : undefined} />
@@ -212,6 +234,7 @@ const styles = StyleSheet.create({
   rules: { flexDirection: 'row', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 },
   file: { minHeight: 62, flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 6 },
   thumb: { width: 54, height: 42, borderRadius: 10, backgroundColor: panel.page },
+  noPreview: { alignItems: 'center', justifyContent: 'center', gap: 1 },
   fileName: { fontFamily: fonts.bold, fontSize: 14, color: panel.text },
   small: { fontFamily: fonts.regular, fontSize: 12, color: panel.muted },
   tiny: { fontFamily: fonts.regular, fontSize: 11, color: panel.muted },

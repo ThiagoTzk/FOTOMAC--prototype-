@@ -10,12 +10,14 @@ import { Note, ResponsibleUse, vtext } from './ui';
 type Props = { items: ResultItem[]; selfie: string | null; onOpen: (index: number) => void };
 
 /**
- * RF018 — only the photos where the visitor was found, as 108 px squares ("Frame 92").
+ * RF018 — only the photos where the visitor was found, as squares ("Frame 92": 108 px on a phone).
  * Every thumbnail comes from a route that checks THIS session's result on the server.
  */
 export function Results({ items, selfie, onOpen }: Props) {
   const { width } = useWindowDimensions();
-  const columns = width >= 700 ? 5 : width >= 520 ? 4 : 3;
+  // Phones keep the Figma's three columns; on a computer the photos are much larger (~280 px
+  // instead of ~130 px — the committee found them too small to recognise anyone).
+  const columns = width >= 1024 ? 4 : 3;
 
   if (items.length === 0) return <EmptyResult />;
   return (

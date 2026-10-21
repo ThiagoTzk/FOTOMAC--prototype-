@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
@@ -30,7 +31,10 @@ class AccountOut(BaseModel):
     full_name: str
     email: str
     role: str
+    role_label: str
     photographer_signature: str | None
+    valid_until: datetime | None = None      # temporary account: when it stops working (RF031)
+    bound_event_id: uuid.UUID | None = None  # temporary account: the only event it works on
 
 
 class EmailIn(BaseModel):
@@ -47,14 +51,22 @@ class NewPasswordIn(BaseModel):
     password_confirmation: str = Field(max_length=200)
 
 
+class FirstAccessIn(NewPasswordIn):
+    # Hired photographer only (RF031 note 6): identification required before the account works.
+    cpf: str | None = Field(None, max_length=20)
+    birth_date: date | None = None
+
+
 class PasswordRule(BaseModel):
     key: str
     label: str
 
 
 def _account_out(a: Account) -> AccountOut:
-    return AccountOut(id=a.id, full_name=a.full_name, email=a.email, role=a.role.value,
-                      photographer_signature=a.photographer_signature)
+    from app.accounts.service import ROLE_LABEL
+    return AccountOut(id=a.id, full_name=a.full_name, email=a.email, role=a.role.value, role_label=ROLE_LABEL[a.role],
+                      photographer_signature=a.photographer_signature, valid_until=a.valid_until,
+                      bound_event_id=a.bound_event_id)
 
 
 def _set_session_cookie(response: Response, token: str) -> None:
@@ -124,13 +136,14 @@ def reset_password(body: NewPasswordIn, db: Session = Depends(get_session)):
 
 @router.post("/first-access/check")
 def check_activation_link(body: TokenIn, db: Session = Depends(get_session)):
-    return {"valid": service.link_is_valid(db, body.token, PasswordTokenPurpose.ACTIVATION)}
+    return service.activation_info(db, body.token)
 
 
 @router.post("/first-access", response_model=AccountOut, dependencies=[Depends(password_link_limiter)])
-def first_access(body: NewPasswordIn, response: Response, db: Session = Depends(get_session)):
+def first_access(body: FirstAccessIn, response: Response, db: Session = Depends(get_session)):
     try:
-        result = service.activate_account(db, body.token, body.password, body.password_confirmation)
+        result = service.activate_account(db, body.token, body.password, body.password_confirmation,
+                                          body.cpf, body.birth_date)
     except service.AuthError as exc:
         raise _password_error(exc) from None
     _set_session_cookie(response, result.session_token)

@@ -3,12 +3,14 @@
 Privacy guarantees enforced here, on the server (RF014 note 1, RF019 note 1):
 - only "Publicado" events exist publicly; everything else is "not found";
 - no image is served unless it is in the result of THIS visitor session's last search;
-- the selfie and its vector live only in memory during the search (RF016 note 4);
+- the search reference comes only from the camera, through the guided capture with liveness check
+  (RF036): the frames and their vectors live only in memory during the search (RF016 note 4);
 - the search compares only against vectors of ONE event (RF010 note 4, RF016 note 1).
 """
 from __future__ import annotations
 
-import hashlib
+import json
+import logging
 import secrets
 import uuid
 from dataclasses import dataclass
@@ -19,32 +21,49 @@ from sqlalchemy.orm import Session
 
 from app import audit, parameters
 from app.auth.tokens import token_hash
+from app.calibration import poses
+from app.config import get_settings
 from app.db.models import (Account, AccountRole, AccountStatus, ConsentRecord, Event, EventStatus, FaceEmbedding,
                            Image, ImageIndexingStatus, ImageReviewStatus, RemovalRequest, RemovalStatus, Theme,
                            VisitorSession)
 from app.events.service import EventError, NotFound
 from app.face.port import FaceEngine, FaceQualityTooLowError, NoFaceDetectedError
-from app.face.selection import select_query_face
+from app.face.selection import NO_FACE_MESSAGE, select_query_face
 from app.imaging import decode_image, is_jpeg
 from app.notifications.port import EmailMessage, EmailSender
 from app.security import signed_links
 
 SESSION_HOURS = 2
-MAX_SELFIE_BYTES = 10 * 1024 * 1024  # RF016
 REMOVAL_HOURS = 72                 # RF023
+
+# Guided capture (RF036). The browser takes ~6 frames per step (front + 4 movements) at most 1280 px.
+MOVES = ("esquerda", "direita", "cima", "baixo")
+CAPTURE_SECONDS = 120              # the drawn order is valid for one capture, right after it is asked
+MIN_FRAMES, MAX_FRAMES = 5, 40
+MAX_FRAME_BYTES = 2 * 1024 * 1024
+# The poses of one capture must be the same person: otherwise someone could turn their own head for
+# the liveness check while showing another person's photo in the frontal frame. Same person across
+# poses scores ~0.4-0.9 with SFace; different people stay below ~0.25 (NASA fixtures: at most 0.24).
+# The development log (diagnostics_log) records the real values, to tune this with real faces.
+SAME_PERSON = 0.30
+
+log = logging.getLogger("fotomac.liveness")
 
 # ------------------------------------------------------------------ consent text (RF015)
 # Versioned: the version goes to every consent record, so it is always possible to prove
 # WHICH text a visitor accepted (RF015 note 7). Change the text → change the version.
-CONSENT_VERSION = "2026-10-v1"
+CONSENT_VERSION = "2026-10-v3"   # v2 (17/10/2026): guided capture with liveness check (requirements v2.0, RF015)
+                                 # v3 (19/10/2026): the paragraph on minors left with the rest of the minors rules,
+                                 # awaiting the official answer of the advisor and the coordination
 CONSENT_TITLE = "Permissão para uso de imagem"
 CONSENT_PARAGRAPHS = [
-    "Para encontrar suas fotos em nosso banco de dados, precisamos que você envie um autorretrato.",
+    "Para encontrar suas fotos, precisamos de uma captura rápida do seu rosto: olhe para a câmera e siga os "
+    "movimentos indicados na tela.",
     "Sua privacidade é nossa prioridade e seus dados serão tratados de acordo com a Lei Geral de Proteção de Dados "
     "(Lei nº 13.709/2018).",
-    "Sua foto será utilizada apenas para comparar com as fotos deste evento. A imagem será excluída após o "
-    "processamento. Não compartilhamos sua imagem com terceiros.",
-    "Este serviço não se destina a pessoas menores de 18 anos sem o consentimento de um dos pais ou do responsável legal.",
+    "A captura será utilizada apenas para comparar com as fotos deste evento e para confirmar que há uma pessoa real "
+    "diante da câmera. Somente alguns quadros são enviados, e eles são excluídos após o processamento; o vídeo não é "
+    "gravado. Não compartilhamos sua imagem com terceiros.",
     "Para mais informações, acesse nossa Política de Privacidade e LGPD. Ao clicar em “Estou ciente”, concordo com os "
     "termos e condições.",
 ]
@@ -67,7 +86,8 @@ def _now() -> datetime:
 def published_events() -> Select:
     # RF013 note 8: only "Publicado"; "Em Edição", "Em Processamento" and "Expirado" do not
     # exist for the public — not even by direct address.
-    return select(Event).where(Event.status == EventStatus.PUBLISHED)
+    return select(Event).where(Event.status == EventStatus.PUBLISHED,
+                               Event.deletion_due_at.is_(None))  # an event being deleted left the site at once
 
 
 def published_images() -> Select:
@@ -160,7 +180,7 @@ class Match:
     similarity: float
 
 
-def search(db: Session, engine: FaceEngine, session: VisitorSession | None, event: Event, selfie: bytes) -> list[Match]:
+def _require_session(db: Session, session: VisitorSession | None, event: Event) -> VisitorSession:
     # RF016 note 3 / RF015 note 1: without the recorded consent, NO vector is generated.
     if session is None or session.event_id != event.id:
         raise PublicError("Antes da busca, leia o aviso de permissão para uso de imagem e confirme que está ciente.",
@@ -168,43 +188,113 @@ def search(db: Session, engine: FaceEngine, session: VisitorSession | None, even
     if session.searches >= parameters.get(db, "searches_per_session"):
         raise PublicError("Você atingiu o limite de buscas desta sessão. Volte ao evento e tente novamente mais tarde.",
                           "limit")
-    if len(selfie) > MAX_SELFIE_BYTES or not is_jpeg(selfie):
-        raise PublicError("Envie uma foto em JPEG de até 10 MB.", "format")
+    return session
 
-    image = decode_image(selfie)  # in memory only: never written to disk, log or cache (RF016 note 4)
-    faces = engine.detect(image)
-    try:
-        query = select_query_face(faces, image.shape[1], image.shape[0], parameters.get(db, "min_detection_score"),
-                                  parameters.get(db, "min_query_face_side"))
-    except (NoFaceDetectedError, FaceQualityTooLowError) as exc:  # user-safe messages (RF017 notes 4-5)
-        reason = "no_face" if isinstance(exc, NoFaceDetectedError) else "low_quality"
-        session.searches += 1
-        audit.record(db, "public.search", None, "event", event.id, outcome=reason)  # aggregated, anonymous
-        db.commit()
-        raise PublicError(str(exc), reason) from None
 
-    vector = query.embedding
-    distance = FaceEmbedding.embedding.cosine_distance(vector)
-    best = func.max(1 - distance).label("similarity")
-    rows = db.execute(
-        select(FaceEmbedding.image_id, best)
-        .join(Image, Image.id == FaceEmbedding.image_id)
-        .where(FaceEmbedding.event_id == event.id,                       # ONE event, always
-               FaceEmbedding.model_version == engine.model_version,      # comparable vectors only
-               Image.review_status == ImageReviewStatus.PUBLISHED,
-               Image.indexing_status == ImageIndexingStatus.PROCESSED,
-               Image.removal_requested_at.is_(None))                     # RF023 note 4
-        .group_by(FaceEmbedding.image_id)
-        .having(best >= parameters.get(db, "similarity_threshold"))
-        .order_by(best.desc())
-        .limit(parameters.get(db, "max_results_per_search"))).all()
-    del vector, query, faces, image  # nothing derived from the selfie survives this function
-
-    matches = [Match(r.image_id, float(r.similarity)) for r in rows]
-    session.searches += 1
-    session.result_ids = [m.image_id for m in matches]  # RF016 note 7: results bound to the session
-    audit.record(db, "public.search", None, "event", event.id, found=len(matches))  # no visitor data (RF024 note 3)
+def issue_challenge(db: Session, session: VisitorSession | None, event: Event) -> list[str]:
+    """Draws the order of the 4 head movements for ONE guided capture (RF036 note 2). Drawn here, not
+    in the browser, so nobody can choose the order of a video recorded beforehand."""
+    session = _require_session(db, session, event)
+    order = secrets.SystemRandom().sample(MOVES, len(MOVES))
+    session.capture_order, session.capture_issued_at = order, _now()
     db.commit()
+    return order
+
+
+def _refuse(db: Session, session: VisitorSession, event: Event, outcome: str, message: str, diagnostics: dict) -> None:
+    session.searches += 1
+    audit.record(db, "public.search", None, "event", event.id, outcome=outcome)  # aggregated, anonymous (RF024)
+    db.commit()
+    if get_settings().diagnostics_log:
+        log.info("busca recusada (%s): %s", outcome, json.dumps(diagnostics, ensure_ascii=False))
+    raise PublicError(message, outcome)
+
+
+LIVENESS_MESSAGE = ("Não conseguimos confirmar os movimentos. Busque de novo e siga o bonequinho, virando o rosto "
+                    "devagar, com o rosto inteiro no círculo e boa luz.")
+
+
+def search(db: Session, engine: FaceEngine, session: VisitorSession | None, event: Event,
+           frames: list[bytes], steps: list[str]) -> list[Match]:
+    """Public search from a guided capture (RF016, RF017, RF036): frames taken while the visitor
+    followed the movements drawn by issue_challenge(), each tagged with its step."""
+    session = _require_session(db, session, event)
+    # The drawn order is used once, whatever happens next: a failed capture asks for a new order.
+    order, issued = session.capture_order, session.capture_issued_at
+    session.capture_order = session.capture_issued_at = None
+    if not order or not issued or (_now() - issued).total_seconds() > CAPTURE_SECONDS:
+        db.commit()
+        raise PublicError("A captura expirou. Toque em “Buscar minhas fotos” e grave de novo.", "challenge")
+    if not MIN_FRAMES <= len(frames) <= MAX_FRAMES or len(frames) != len(steps) or \
+            any(st not in ("frente", *MOVES) for st in steps) or \
+            any(len(f) > MAX_FRAME_BYTES or not is_jpeg(f) for f in frames):
+        db.commit()
+        raise PublicError("A captura chegou incompleta. Grave de novo.", "format")
+
+    # Each frame is decoded and detected ONCE, in memory only (RF016 note 4).
+    images = [decode_image(f) for f in frames]
+    detected = [engine.detect(img) for img in images]
+    described = [poses.frame_from_faces(n, img, faces) for n, (img, faces) in enumerate(zip(images, detected))]
+    chosen, liveness = poses.select_guided(described, steps)
+    diagnostics = {"pedido": ["frente", *order], "liveness": liveness}
+    if not any(described):  # no face in any frame: say so (RF017 note 4), not "movements not confirmed"
+        _refuse(db, session, event, "no_face", NO_FACE_MESSAGE, diagnostics)
+    if liveness.get("order") != order:
+        liveness["passed"] = False
+        diagnostics["ordem_recebida"] = liveness.get("order")
+    if not liveness["passed"]:
+        _refuse(db, session, event, "liveness", LIVENESS_MESSAGE, diagnostics)
+
+    # One query face per pose (RF017); the frontal pose is required, the others are a bonus.
+    min_score, min_side = parameters.get(db, "min_detection_score"), parameters.get(db, "min_query_face_side")
+    vectors = []
+    for index, pose in chosen:
+        img = images[index]
+        try:
+            face = select_query_face(detected[index], img.shape[1], img.shape[0], min_score, min_side)
+        except (NoFaceDetectedError, FaceQualityTooLowError) as exc:
+            if pose == "frente":  # user-safe messages (RF017 notes 4-5)
+                reason = "no_face" if isinstance(exc, NoFaceDetectedError) else "low_quality"
+                _refuse(db, session, event, reason, str(exc), diagnostics)
+            continue
+        vectors.append((pose, face.embedding))
+    # RF017 note 7: every pose must be the same person as the frontal one.
+    front = vectors[0][1]
+    alike = {pose: round(float(front @ v), 3) for pose, v in vectors[1:]}
+    diagnostics["mesma_pessoa"] = alike
+    if any(value < SAME_PERSON for value in alike.values()):
+        _refuse(db, session, event, "consistency",
+                "Durante a captura o rosto mudou ou apareceu outra pessoa. Busque de novo com só o seu rosto na câmera.",
+                diagnostics)
+
+    # RF016 note 7: a photo is returned when ANY pose reaches the threshold; it keeps its best similarity.
+    threshold, limit = parameters.get(db, "similarity_threshold"), parameters.get(db, "max_results_per_search")
+    best_of: dict[uuid.UUID, float] = {}
+    for _, vector in vectors:
+        best = func.max(1 - FaceEmbedding.embedding.cosine_distance(vector)).label("similarity")
+        rows = db.execute(
+            select(FaceEmbedding.image_id, best)
+            .join(Image, Image.id == FaceEmbedding.image_id)
+            .where(FaceEmbedding.event_id == event.id,                       # ONE event, always
+                   FaceEmbedding.model_version == engine.model_version,      # comparable vectors only
+                   Image.review_status == ImageReviewStatus.PUBLISHED,
+                   Image.indexing_status == ImageIndexingStatus.PROCESSED,
+                   Image.removal_requested_at.is_(None))                     # RF023 note 4
+            .group_by(FaceEmbedding.image_id)
+            .having(best >= threshold)
+            .order_by(best.desc())
+            .limit(limit)).all()
+        for r in rows:
+            best_of[r.image_id] = max(best_of.get(r.image_id, 0.0), float(r.similarity))
+    del vectors, front, detected, described, images, frames  # nothing derived from the capture survives
+
+    matches = sorted((Match(i, sim) for i, sim in best_of.items()), key=lambda m: -m.similarity)[:limit]
+    session.searches += 1
+    session.result_ids = [m.image_id for m in matches]  # RF016 note 8: results bound to the session
+    audit.record(db, "public.search", None, "event", event.id, found=len(matches), poses=len(alike) + 1)
+    db.commit()
+    if get_settings().diagnostics_log:
+        log.info("busca aceita: %s", json.dumps(diagnostics, ensure_ascii=False))
     return matches
 
 
@@ -243,28 +333,6 @@ def request_removal(db: Session, sender: EmailSender, session: VisitorSession | 
                     contact: str, reason: str | None) -> RemovalRequest:
     """From the enlarged photo of a search result (RF023 note 1, preferred way)."""
     return _open_removal(db, sender, [allowed_image(db, session, image_id)], contact, reason)[0]
-
-
-def request_removal_by_file(db: Session, sender: EmailSender, data: bytes, contact: str,
-                            reason: str | None) -> RemovalRequest:
-    """By sending the file obtained (RF023 note 1) — open to anyone, even someone who never
-    searched, because third parties appear incidentally in photos (RF022 note 6).
-
-    Only an EXACT copy of the delivered file is accepted: the deletion is irreversible and must
-    never fall on a different image. A re-compressed copy (e.g. forwarded by a messenger) does
-    not match; the person is then guided to the facial search instead.
-
-    The same photo sent by the same photographer to two events yields the very same file, so
-    EVERY published copy is covered: it is the same image, and the person asked for it to go."""
-    if len(data) > MAX_SELFIE_BYTES * 3 or not is_jpeg(data):
-        raise PublicError("Envie o arquivo JPEG exatamente como foi baixado do FOTOMAC.", "file")
-    copies = db.scalars(published_images().where(Image.delivered_sha256 == hashlib.sha256(data).hexdigest())).all()
-    if not copies:
-        raise PublicError("Não encontramos esta imagem no acervo. Envie o arquivo exatamente como foi baixado do "
-                          "FOTOMAC — cópias reenviadas por aplicativos de mensagem mudam o arquivo. Você também "
-                          "pode localizar a foto pela busca do evento e usar “Solicitar remoção” na foto ampliada.",
-                          "not_found")
-    return _open_removal(db, sender, list(copies), contact, reason)[0]
 
 
 def _open_removal(db: Session, sender: EmailSender, images: list[Image], contact: str,

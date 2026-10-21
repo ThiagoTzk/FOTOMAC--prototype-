@@ -1,11 +1,16 @@
-// End-to-end test of the VISITOR area (RF013-RF023) in a real browser, against the real API,
-// InsightFace and SeaweedFS. The photographer part is set up through the API.
+// End-to-end test of the VISITOR area (RF013-RF016, RF022, RF036) in a real browser, against the real
+// API, YuNet + SFace and SeaweedFS. The photographer part is set up through the API.
 //
 //   node e2e/visitor.e2e.mjs <photos-folder> [screenshot-folder]
 //
-// photos-folder: grupo.jpg and grupo2.jpg (group photos with the same people), selfie.png (a
-// crop of one person — PNG on purpose: the browser must convert it), estranho.jpg (someone
-// else), paisagem.jpg (no face) and capa.jpg.
+// photos-folder: grupo.jpg, grupo2.jpg, paisagem.jpg and capa.jpg.
+//
+// v2.0 (17/10/2026): the search is made ONLY by the guided capture with liveness check — there is no
+// gallery upload any more. Chromium's fake camera shows a test pattern (no face, no movement), so a
+// browser can prove the whole path (notice → tips → order drawn by the server → frames → refusal →
+// camera off) but NOT a search that finds photos: that needs a real head turning. The results, the
+// viewer, the download and the removal are covered by backend/tests/test_public.py (real SFace with
+// simulated poses) and by the manual test with a real face.
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -68,7 +73,7 @@ try {
     if ((await (await sp.request.get(`${API}/events/${eventId}`)).json()).status === 'published') break;
     await sp.waitForTimeout(1000);
   }
-  check((await (await sp.request.get(`${API}/events/${eventId}`)).json()).status === 'published', 'InsightFace indexou e o evento foi publicado');
+  check((await (await sp.request.get(`${API}/events/${eventId}`)).json()).status === 'published', 'YuNet + SFace indexou e o evento foi publicado');
   await staff.close();
 
   // ---------------------------------------------------------------- visitor: no account, phone width
@@ -121,137 +126,62 @@ try {
   check(await text(/destinam-se exclusivamente às pessoas nelas retratadas/).isVisible(), 'aviso de uso responsável (RF022)');
   await shot('evento');
 
-  console.log('4. Permissão antes da câmera e da galeria (RF015)');
+  console.log('4. Permissão antes da câmera (RF015)');
   await button('Buscar minhas fotos').click();
   await text('Permissão para uso de imagem').waitFor();
   check(await page.getByRole('checkbox').count() === 0, 'nenhuma caixa pré-marcada: só a ação "Estou ciente"');
-  await text(/menores de 18 anos/).waitFor();
-  check(true, 'advertência sobre menores (Art. 14)');
+  await text(/o vídeo não é gravado/).waitFor();
+  check(true, 'o aviso explica a captura guiada (RF015 nota 3)');
+  check(!(await text(/menores de 18 anos/).isVisible().catch(() => false)), 'sem parágrafo sobre menores (retirado em 19/10)');
   await shot('permissao', false);
   await button('Agora não').click();
-  check(!(await text('Realizar upload').isVisible().catch(() => false)), 'sem "Estou ciente", as opções não aparecem');
+  check(!(await text('Busca pelo seu rosto').isVisible().catch(() => false)), 'sem "Estou ciente", a câmera não abre');
+  check(!(await text('Realizar upload').isVisible().catch(() => false)), 'não existe mais envio de foto pela galeria');
   const blocked = await page.request.post(`${API}/public/events/${eventId}/search`, { multipart: {
-    selfie: { name: 's.jpg', mimeType: 'image/jpeg', buffer: readFileSync(photo('grupo.jpg')) } } });
+    frames: { name: 'q.jpg', mimeType: 'image/jpeg', buffer: readFileSync(photo('grupo.jpg')) }, steps: 'frente' } });
   check(blocked.status() === 403, 'o servidor recusa a busca sem ciência (403)');
+
+  console.log('5. Captura guiada: ordem sorteada pelo servidor, quadros, prova de vida (RF016, RF036)');
   await button('Buscar minhas fotos').click();
   await button('Estou ciente').click();
-  await text('Realizar upload').waitFor();
-  await shot('opcoes', false);
+  await text('Busca pelo seu rosto').waitFor();
+  await text('Dicas para encontrar suas fotos').waitFor();
+  await page.waitForFunction(() => document.querySelector('video')?.readyState >= 2);
+  await shot('captura-dicas', false);
+  const drawn = page.waitForResponse((r) => r.url().endsWith('/capture'));
+  await button('Começar').click();
+  const order = (await (await drawn).json()).order;
+  check(order.length === 4 && [...order].sort().join() === 'baixo,cima,direita,esquerda', `ordem sorteada pelo servidor: ${order.join(', ')}`);
+  await text(/Vire devagar|Levante o rosto|Abaixe o rosto/).waitFor({ timeout: 15000 });
+  const chips = await visible(page.locator('[aria-label="Gravação guiada do rosto"], [aria-label="Busca pelo seu rosto"]')).innerText();
+  check(chips.indexOf(order[0]) < chips.indexOf(order[3]), 'a tela segue a ordem do servidor');
+  await shot('captura-gravando', false);
+  const answer = await page.waitForResponse((r) => r.url().endsWith('/search'), { timeout: 60000 });
+  const reason = (await answer.json()).detail?.reason;
+  check(answer.status() === 422 && reason === 'no_face', `câmera falsa sem rosto: busca recusada (${reason})`);
+  await visible(page.getByRole('alert')).first().waitFor();
+  check(/rosto/i.test(await visible(page.getByRole('alert')).first().innerText()), 'mensagem orienta nova captura (RF017 nota 4)');
+  await shot('captura-recusada', false);
+  // What matters for privacy: the camera itself is OFF (every track ended), not just hidden.
+  check(await page.evaluate(() => [...document.querySelectorAll('video')]
+    .every((v) => !v.srcObject || v.srcObject.getTracks().every((t) => t.readyState === 'ended'))), 'câmera desligada após a captura');
+  const replay = await page.request.post(`${API}/public/events/${eventId}/search`, { multipart: {
+    frames: { name: 'q.jpg', mimeType: 'image/jpeg', buffer: readFileSync(photo('grupo.jpg')) }, steps: 'frente' } });
+  check((await replay.json()).detail?.reason === 'challenge', 'a ordem sorteada vale uma vez só');
 
-  console.log('5. Busca pela galeria — PNG convertido no navegador (RF016)');
-  const upload = async (file) => {
-    const [chooser] = await Promise.all([page.waitForEvent('filechooser'),
-      visible(page.getByRole('menuitem', { name: /Realizar upload/ })).click()]);
-    await chooser.setFiles(photo(file));
-  };
-  await upload('selfie.png');
-  await text('2 fotos encontradas').waitFor({ timeout: 30000 });
-  check(true, 'a pessoa foi encontrada nas 2 fotos de grupo — e não na paisagem');
-  check(await text(/semelhança visual, não identidade/).isVisible(), 'aviso de similaridade (RF016 nota 5)');
-  await shot('resultado');
-  const thumb = await page.request.get(`${API}/public/images/${ids['grupo.jpg']}/thumb`);
-  check(thumb.status() === 200, 'agora a miniatura é servida (está no resultado desta sessão)');
-  const other = await page.request.get(`${API}/public/images/${ids['paisagem.jpg']}/thumb`);
-  check(other.status() === 404, 'a paisagem do mesmo evento continua inacessível');
-
-  console.log('5b. Sair do evento e voltar: o resultado some (relato do Thiago)');
+  console.log('6. Sair do evento e voltar: a permissão é pedida de novo (relato do Thiago)');
   await visible(page.getByRole('link', { name: 'Voltar' })).click();
   await text('Encontre suas fotos nos eventos do CESMAC').waitFor();
   await text(EVENT).click();
   await text('Procure suas fotos').waitFor();
   await page.waitForTimeout(800);
-  // exact: "Suas fotos" would also match "Procure suas fotos".
-  check(await page.getByText('Suas fotos', { exact: true }).count() === 0, 'ao voltar, o bloco "Suas fotos" não existe');
-  check(await page.locator('img[src*="/public/images/"]').count() === 0, 'nenhuma imagem do resultado anterior na página (nem escondida)');
-  check((await page.request.get(`${API}/public/images/${ids['grupo.jpg']}/thumb`)).status() === 404,
-    'e o servidor também esqueceu o resultado (miniatura → 404)');
+  check(await page.locator('img[src*="/public/images/"]').count() === 0, 'nenhuma imagem de resultado na página');
   await button('Buscar minhas fotos').click();
   await text('Permissão para uso de imagem').waitFor();
   check(true, 'a permissão é pedida de novo');
-  await button('Estou ciente').click();
-  await text('Realizar upload').waitFor();
-  await upload('selfie.png');
-  await text('2 fotos encontradas').waitFor({ timeout: 30000 });
-
-  console.log('6. Foto ampliada, navegação e download (RF018, RF019)');
-  await visible(page.getByRole('button', { name: 'Abrir foto 1 de 2' })).click();
-  await text('Foto 1 de 2').waitFor();
-  check(await text('Fotografia por: Moacir Barbosa — Centro Universitário CESMAC').isVisible(), 'crédito na tela');
-  await shot('ampliada', false);
-  await button('Próxima foto').click();
-  await text('Foto 2 de 2').waitFor();
-  const [download] = await Promise.all([page.waitForEvent('download'), button('Baixar').click()]);
-  const bytes = readFileSync(await download.path());
-  check(bytes[0] === 0xff && bytes[1] === 0xd8, `download é JPEG (${download.suggestedFilename()})`);
-  check(!/8333|X-Amz/.test(download.url()), 'o endereço do download não expõe o armazenamento (vai para o "Onde obtido" do arquivo)');
-  check((await page.request.get(download.url())).status() === 200, 'o link funciona nesta sessão');
-  check((await (await browser.newContext()).request.get(download.url())).status() === 404, 'e não funciona fora dela');
-  check(bytes.includes(Buffer.from('Moacir Barbosa')), 'créditos gravados nos metadados do arquivo');
-  const downloadedPath = join(SHOTS, 'baixada.jpg');
-  await download.saveAs(downloadedPath);
-
-  console.log('7. Remoção a partir da foto (RF023)');
-  // Removes photo 1 — photo 2 (downloaded above) is used in step 9 for the removal by file.
-  await button('Foto anterior').click();
-  await text('Foto 1 de 2').waitFor();
-  await button('Solicitar remoção desta foto').click();
-  await text('Foto selecionada para a solicitação da remoção').waitFor();
-  await button('Enviar').click();
-  await text('Informe um e-mail válido para receber a confirmação.').waitFor();
-  await page.getByLabel('E-mail para contato').fill('pessoa.retratada@exemplo.com');
-  await shot('remocao', false);
-  await button('Enviar').click();
-  await text('Solicitação recebida').waitFor();
-  await shot('remocao-ok', false);
-  await button('Entendi').click();
-  await text('1 foto encontrada').waitFor();
-  check(true, 'a foto saiu do resultado na hora (nota 4)');
-  check(!!newestMail(/pessoa\.retratada@exemplo\.com/), 'confirmação enviada a quem pediu');
-  check(!!newestMail(new RegExp(`To: ${email.replace(/\./g, '\\.')}[\\s\\S]*solicita`)), 'fotógrafo avisado (nota 5)');
-
-  console.log('8. Resultado vazio, foto sem rosto e câmera');
-  await button('Buscar minhas fotos').click();
-  await upload('estranho.jpg');
-  await text('Nenhuma foto encontrada').waitFor({ timeout: 30000 });
-  check(true, 'outra pessoa não recebe nenhuma foto');
-  await shot('sem-fotos');
-  await button('Buscar minhas fotos').click();
-  await upload('paisagem.jpg');
-  await visible(page.getByRole('alert')).first().waitFor();
-  check(/rosto/i.test(await visible(page.getByRole('alert')).first().innerText()), 'foto sem rosto: mensagem orienta nova captura (RF017 nota 4)');
-  await button('Buscar minhas fotos').click();
-  await visible(page.getByRole('menuitem', { name: /Tirar foto/ })).click();
-  await text('Centralize o rosto no molde').waitFor();
-  await button('Capturar').waitFor();
-  await page.waitForFunction(() => document.querySelector('video')?.readyState >= 2);
-  await shot('camera', false);
-  await button('Capturar').click();
-  await visible(page.getByRole('alert')).first().waitFor({ timeout: 30000 });
-  check(true, 'foto da câmera enviada pelo mesmo caminho (a câmera falsa não tem rosto)');
-  // What matters for privacy: the camera itself is OFF (every track ended), not just hidden.
-  check(await page.evaluate(() => [...document.querySelectorAll('video')]
-    .every((v) => !v.srcObject || v.srcObject.getTracks().every((t) => t.readyState === 'ended'))), 'câmera desligada após a captura');
-
-  console.log('9. Remoção pelo arquivo, sem busca (RF022 nota 6)');
+  await button('Agora não').click();
   const stranger = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const sp2 = await stranger.newPage();
-  await sp2.goto(WEB);
-  await sp2.getByRole('button', { name: 'Menu' }).click();
-  await sp2.getByRole('menuitem', { name: 'Solicitar remoção de imagem' }).click();
-  await sp2.getByText('Tem o arquivo da foto?').waitFor();
-  const [chooser] = await Promise.all([sp2.waitForEvent('filechooser'), sp2.getByText('Selecionar arquivo da foto (JPEG)').click()]);
-  await chooser.setFiles(downloadedPath);
-  await sp2.getByLabel('E-mail para contato').fill('terceiro@exemplo.com');
-  await sp2.getByRole('button', { name: 'Enviar', exact: true }).click();
-  await sp2.getByText(/Solicitação recebida|Não encontramos|Já existe/).first().waitFor();
-  const answer = await sp2.getByText(/Solicitação recebida|Não encontramos|Já existe/).first().innerText();
-  check(answer === 'Solicitação recebida', `arquivo baixado identificou a foto (resposta: ${answer.slice(0, 80)})`);
-  await sp2.screenshot({ path: join(SHOTS, `${String(++step).padStart(2, '0')}-remocao-por-arquivo.png`), fullPage: true });
-  check(true, 'quem nunca buscou identificou a foto pelo arquivo baixado');
-  await page.reload();
-  await text('Procure suas fotos').waitFor();
-  await page.waitForTimeout(800);
-  check(!(await text('Nenhuma foto encontrada').isVisible().catch(() => false)), 'ao recarregar a aba, o resultado também some');
 
   console.log('10. Política de Privacidade e acesso da equipe');
   await sp2.goto(`${WEB}/privacidade`);
@@ -262,7 +192,7 @@ try {
   await sp2.getByText('Acesse sua conta').waitFor();
   check(true, 'sem sessão, /painel vai para o login da equipe');
   await sp2.goto(WEB);
-  await sp2.getByText('Encontre suas fotos nos eventos do CESMAC').waitFor();
+  await sp2.getByText('Participou de um evento do CESMAC? Encontre suas fotos.').waitFor();   // web layout (≥1024 px)
   await sp2.screenshot({ path: join(SHOTS, `${String(++step).padStart(2, '0')}-inicio-desktop.png`), fullPage: true });
 
   check(problems.length === 0, `sem erros no console${problems.length ? `: ${problems.join(' | ')}` : ''}`);

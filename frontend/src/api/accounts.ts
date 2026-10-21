@@ -1,8 +1,8 @@
 /** Administrator: accounts (RF001, RF002 note 7, RF003). The server re-checks the role. */
 import { api } from './client';
 
-export type Role = 'admin' | 'photographer';
-export type AccountStatus = 'pending' | 'active' | 'inactive' | 'suspended';
+export type Role = 'admin' | 'photographer' | 'marketing' | 'contractor';
+export type AccountStatus = 'pending' | 'active' | 'inactive' | 'suspended' | 'expired';
 
 export type AccountRow = {
   id: string;
@@ -17,8 +17,20 @@ export type AccountRow = {
   activation_link: 'valid' | 'expired' | null;
   created_at: string;
 };
-export type AccountDetail = AccountRow & { owned_events: number; is_me: boolean };
-export type AccountInput = { full_name: string; email?: string; role: Role; photographer_signature: string | null };
+export type AccountDetail = AccountRow & {
+  owned_events: number;
+  is_me: boolean;
+  dev_link_available: boolean; // TEMPORÁRIO — remover antes da implantação (só em desenvolvimento)
+  /** Temporary account of a hired photographer (RF031). The CPF comes masked from the server. */
+  contractor: {
+    event_id: string | null; event_name: string | null; contract_number: string | null; valid_until: string | null;
+    cpf: string | null; birth_date: string | null; identity_erased_at: string | null; photos: number; photos_pending: number;
+  } | null;
+};
+export type AccountInput = {
+  full_name: string; email?: string; role: Role; photographer_signature: string | null;
+  bound_event_id?: string | null; contract_number?: string | null;
+};
 
 export function listAccounts(f: { q?: string; role?: Role | null; status?: AccountStatus | null }) {
   const p = new URLSearchParams();
@@ -33,3 +45,9 @@ export const updateAccount = (id: string, body: AccountInput) => api<AccountDeta
 export const changeStatus = (id: string, status: AccountStatus) => api<AccountDetail>(`/admin/accounts/${id}/status`, { body: { status } });
 export const resendLink = (id: string) => api<void>(`/admin/accounts/${id}/activation-link`, { method: 'POST' });
 export const unlockAccount = (id: string) => api<AccountDetail>(`/admin/accounts/${id}/unlock`, { method: 'POST' });
+
+// TEMPORÁRIO — REMOVER ANTES DA IMPLANTAÇÃO. Mostra o link de definição de senha ao administrador, só para
+// demonstração; o servidor só atende em desenvolvimento (e-mails viram arquivo). Em produção o link vai
+// apenas ao e-mail do titular (RF001 nota 5).
+export const devActivationLink = (id: string) =>
+  api<{ url: string }>(`/admin/accounts/${id}/activation-link/dev`, { method: 'POST' });

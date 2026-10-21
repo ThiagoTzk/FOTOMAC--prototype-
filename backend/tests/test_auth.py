@@ -78,7 +78,8 @@ def test_account_is_created_without_password_and_cannot_log_in(client, pending):
 
 def test_first_access_full_flow(client, pending, sender, db):
     token = sender.last_token()
-    assert client.post("/api/v1/auth/first-access/check", json={"token": token}).json() == {"valid": True}
+    assert client.post("/api/v1/auth/first-access/check", json={"token": token}).json() == {
+        "valid": True, "needs_identity": False, "full_name": None}   # identification: hired photographer only
 
     weak = client.post("/api/v1/auth/first-access",
                        json={"token": token, "password": "abc", "password_confirmation": "abc"})
@@ -109,14 +110,14 @@ def test_expired_activation_link_is_refused(client, pending, sender, db):
     link = db.scalar(select(m.PasswordToken).where(m.PasswordToken.account_id == pending.id))
     link.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     db.flush()
-    assert client.post("/api/v1/auth/first-access/check", json={"token": token}).json() == {"valid": False}
+    assert client.post("/api/v1/auth/first-access/check", json={"token": token}).json()["valid"] is False
 
 
 def test_reissuing_the_link_invalidates_the_previous_one(client, pending, sender, db):
     first = sender.last_token()
     service.send_activation_link(db, pending, sender)
-    assert client.post("/api/v1/auth/first-access/check", json={"token": first}).json() == {"valid": False}
-    assert client.post("/api/v1/auth/first-access/check", json={"token": sender.last_token()}).json() == {"valid": True}
+    assert client.post("/api/v1/auth/first-access/check", json={"token": first}).json()["valid"] is False
+    assert client.post("/api/v1/auth/first-access/check", json={"token": sender.last_token()}).json()["valid"] is True
 
 
 def test_tokens_are_stored_only_as_hashes(pending, sender, db):

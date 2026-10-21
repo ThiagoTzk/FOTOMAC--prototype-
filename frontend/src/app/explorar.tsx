@@ -6,11 +6,37 @@ import type { PublicFilters } from '@/api/public';
 import { EventList, usePublicEvents } from '@/components/visitor/EventList';
 import { VisitorFilters } from '@/components/visitor/Filters';
 import { VisitorHeader } from '@/components/visitor/Header';
-import { Column, vtext } from '@/components/visitor/ui';
+import { Column, useWide, VButton, vtext } from '@/components/visitor/ui';
+import { EventGrid, ThemeStrip } from '@/components/visitor/web/Home';
+import { PageBand, WebPage, Wrap } from '@/components/visitor/web/Site';
 import { poppins, visitor } from '@/theme/tokens';
 
 /** "Todos" — every published event, page by page, with the same filters as the home. */
 export default function AllEvents() {
+  return useWide() ? <WebAllEvents /> : <MobileAllEvents />;
+}
+
+function WebAllEvents() {
+  const [filters, setFilters] = useState<PublicFilters>({});
+  const { items, total, loading, error, more } = usePublicEvents(filters);
+  return (
+    <WebPage>
+      <PageBand crumbs={[{ label: 'Eventos' }]} title="Todos os eventos"
+                sub={loading && !items.length ? undefined : total === 1 ? '1 evento publicado' : `${total} eventos publicados`}>
+        <View style={{ marginTop: 28, maxWidth: 900, zIndex: 30 }}>
+          <VisitorFilters value={filters} onChange={setFilters} variant="hero" />
+        </View>
+      </PageBand>
+      <ThemeStrip selected={filters.theme_ids ?? []} onSelect={(ids) => setFilters({ ...filters, theme_ids: ids, page: 1 })} />
+      <Wrap style={{ paddingVertical: 48 }}>
+        <EventGrid items={items} loading={loading} error={error} empty="Nenhum evento encontrado com esses filtros." />
+        {more && <View style={{ alignItems: 'center', marginTop: 36 }}><VButton label="Carregar mais eventos" onPress={more} loading={loading} /></View>}
+      </Wrap>
+    </WebPage>
+  );
+}
+
+function MobileAllEvents() {
   const [filters, setFilters] = useState<PublicFilters>({});
   const [showFilters, setShowFilters] = useState(false);
   const { items, total, loading, error, more } = usePublicEvents(filters);

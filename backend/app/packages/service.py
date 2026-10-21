@@ -1,7 +1,11 @@
 """Download of the whole collection as a ZIP (RF012) — generated in the background.
 
-The originals already carry the credits and no GPS (done at upload), so the package is a
-plain copy of them: no recompression (RF012 note 2).
+Two kinds of package (RF012 note 2):
+- the GUARD copy (responsible, administrator, an author's own photos): the originals as received,
+  RAW and HEIC included — they already carry the credits and no GPS (done at upload), so the
+  package is a plain copy of them, without recompression;
+- marketing's PUBLICITY package of someone else's event (RF030 note 3): the JPEG copies.
+Neither has a watermark: the accounts work for CESMAC (RF019 note 9).
 """
 from __future__ import annotations
 
@@ -16,7 +20,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app import audit
-from app.db.models import Account, Event, Image, ImageReviewStatus, PackageJob, PackageStatus
+from app.db.models import Account, AccountRole, Event, EventStatus, Image, ImageReviewStatus, PackageJob, PackageStatus
 from app.events.service import EventError, PermissionDenied, can_manage
 from app.storage.port import ObjectStorage
 
@@ -34,34 +38,52 @@ def _safe(name: str) -> str:
 
 
 def _scope(account: Account, event: Event):
-    """Responsible/admin: every published image. Collaborator: only their own (RF012 note 7)."""
-    own_only = not can_manage(account, event)
-    q = select(Image).where(Image.event_id == event.id, Image.review_status == ImageReviewStatus.PUBLISHED)
-    if own_only:
-        q = q.where(Image.uploaded_by == account.id)
-    return own_only, q
+    """(only_own, publicity, query). Responsible/admin: every published image. Marketing on someone
+    else's published event: every published image, as JPEG copies (RF030). Collaborator: only their
+    own (RF012 note 7). Never an image whose removal was asked (RF012 note 8)."""
+    q = select(Image).where(Image.event_id == event.id, Image.review_status == ImageReviewStatus.PUBLISHED,
+                            Image.removal_requested_at.is_(None))
+    if can_manage(account, event):
+        return False, False, q
+    if account.role == AccountRole.MARKETING and event.status == EventStatus.PUBLISHED:
+        return False, True, q
+    return True, False, q.where(Image.uploaded_by == account.id)
+
+
+def _entry(image: Image, publicity: bool) -> tuple[str, str]:
+    """(storage key, file extension) of what goes into the package for this image."""
+    if image.source_key and not publicity:
+        return image.source_key, image.source_format
+    return image.object_key, "jpg"
 
 
 def estimate(db: Session, account: Account, event: Event) -> dict:
     """RF012 note 4: the volume is shown before preparing."""
-    own_only, q = _scope(account, event)
+    own_only, publicity, q = _scope(account, event)
     sub = q.subquery()
-    count, size = db.execute(select(func.count(), func.coalesce(func.sum(sub.c.size_bytes), 0))).one()
-    return {"images": count, "size_bytes": int(size), "only_own": own_only}
+    size = sub.c.size_bytes if publicity else func.coalesce(sub.c.source_bytes, sub.c.size_bytes)
+    count, total, others = db.execute(select(func.count(), func.coalesce(func.sum(size), 0),
+                                             func.count(sub.c.source_key))).one()
+    return {"images": count, "size_bytes": int(total), "only_own": own_only, "publicity": publicity,
+            "other_formats": 0 if publicity else others}
 
 
 def request_package(db: Session, account: Account, event: Event) -> PackageJob:
-    own_only, q = _scope(account, event)
+    own_only, publicity, q = _scope(account, event)
     if own_only and not db.scalar(select(func.count()).select_from(q.subquery())):
         raise PermissionDenied("Você não tem imagens publicadas neste evento.")
     if not db.scalar(select(func.count()).select_from(q.subquery())):
         raise EventError("O evento ainda não tem imagens publicadas.")
     base = _safe(event.name)
-    name = f"{base} - {_safe(account.photographer_signature or account.full_name)}.zip" if own_only else f"{base}.zip"
-    job = PackageJob(id=uuid.uuid4(), event_id=event.id, account_id=account.id, only_own=own_only, file_name=name)
+    if own_only:
+        name = f"{base} - {_safe(account.photographer_signature or account.full_name)}.zip"
+    else:
+        name = f"{base} - divulgação.zip" if publicity else f"{base}.zip"
+    job = PackageJob(id=uuid.uuid4(), event_id=event.id, account_id=account.id, only_own=own_only,
+                     publicity=publicity, file_name=name)
     db.add(job)
-    # RF012 note 6: mandatory audit trail of who extracted which collection, and when.
-    audit.record(db, "package.request", account.id, "event", event.id, only_own=own_only)
+    # RF012 note 6 and RF030 note 4: mandatory audit trail of who extracted which collection, and when.
+    audit.record(db, "package.request", account.id, "event", event.id, only_own=own_only, publicity=publicity)
     db.commit()
     return job
 
@@ -74,7 +96,7 @@ def build_next(db: Session, storage: ObjectStorage) -> bool:
     job.status = PackageStatus.RUNNING
     db.commit()
     account = db.get(Account, job.account_id)
-    _, q = _scope(account, job.event)
+    _, publicity, q = _scope(account, job.event)
     images = db.scalars(q.order_by(Image.uploaded_at, Image.id)).all()
     folder = _safe(job.event.name)  # one single folder named after the event (RF012 note 3)
     # The ZIP is assembled in a private temporary file (it contains personal data) that is
@@ -84,7 +106,8 @@ def build_next(db: Session, storage: ObjectStorage) -> bool:
     try:
         with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as z:  # JPEG does not compress further
             for n, image in enumerate(images, start=1):
-                z.writestr(f"{folder}/{folder} {n:04d}.jpg", storage.get(image.object_key))
+                key, ext = _entry(image, publicity)
+                z.writestr(f"{folder}/{folder} {n:04d}.{ext}", storage.get(key))
                 if n % 20 == 0:
                     job.progress = round(100 * n / len(images))
                     db.commit()

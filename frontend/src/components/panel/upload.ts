@@ -4,17 +4,21 @@
  * and an interrupted batch resumes without re-sending what is already done (RF007 note 5).
  */
 import { API_URL, api } from '@/api/client';
+import type { UploadRules } from '@/api/images';
 
-export const MAX_FILE_BYTES = 25 * 1024 * 1024;
-export const MAX_FILES_PER_BATCH = 300;
+export const MAX_FILES_PER_BATCH = 500;  // RF007 (300 until 17/10/2026)
 const PARALLEL = 3;
 
 export type EntryStatus = 'checking' | 'valid' | 'invalid' | 'duplicate' | 'waiting' | 'sending' | 'done' | 'failed';
+
+/** jpeg/png/webp: the browser draws a preview; heic and raw usually not (the server makes the JPEG copy). */
+export type Kind = 'jpeg' | 'png' | 'webp' | 'heic' | 'raw';
 
 export type Entry = {
   key: string;
   file: File;
   previewUrl: string;
+  kind?: Kind;
   status: EntryStatus;
   progress: number;
   message?: string;
@@ -23,8 +27,11 @@ export type Entry = {
 
 /** RF008 note 4: the cause in plain Portuguese. */
 const REASONS: Record<string, string> = {
-  format: 'Formato não permitido: envie apenas imagens JPEG.',
+  format: 'Formato não permitido: envie fotografias em JPEG, PNG, HEIC ou WebP.',
   too_large: 'O arquivo ultrapassa o limite de 25 MB por imagem.',
+  raw_too_large: 'O arquivo RAW ultrapassa o limite definido pela administração.',
+  raw_disabled: 'Formatos brutos (RAW) não estão habilitados. Envie a fotografia exportada em JPEG.',
+  format_unavailable: 'Este formato ainda não pode ser recebido. Envie a fotografia em JPEG.',
   corrupted: 'O arquivo está corrompido e não pôde ser lido.',
   event_limit: 'O evento atingiu o limite de 1.000 imagens.',
   duplicate: 'Esta imagem já está no acervo do evento e não será enviada novamente.',
@@ -36,11 +43,32 @@ async function sha256(file: File): Promise<string> {
   return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-async function isJpeg(file: File): Promise<boolean> {
-  // By the binary signature (FF D8 FF), not the extension — the server checks again (RF007 note 2).
-  const head = new Uint8Array(await file.slice(0, 3).arrayBuffer());
-  return head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff;
+const HEIF_BRANDS = ['heic', 'heix', 'heim', 'heis', 'hevc', 'hevx'];
+const TIFF_STARTS = ['II*\0', 'MM\0*', 'IIRO', 'IIRS', 'IIU\0'];
+
+/** By the binary signature, not the extension — the same rules as the server, which checks again
+ *  (RF007 note 2; backend/app/images/formats.py). The name only separates the RAW formats that share
+ *  the TIFF signature (DNG, NEF...). */
+async function detect(file: File, rawExtensions: string[]): Promise<Kind | null> {
+  const b = new Uint8Array(await file.slice(0, 64).arrayBuffer());
+  const text = (from: number, to: number) => String.fromCharCode(...b.slice(from, to));
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'jpeg';
+  if (text(0, 8) === '\x89PNG\r\n\x1a\n') return 'png';
+  if (text(0, 4) === 'RIFF' && text(8, 12) === 'WEBP') return 'webp';
+  if (text(4, 8) === 'ftyp') {
+    const major = text(8, 12);
+    if (major === 'crx ') return 'raw';
+    const compatible = Array.from({ length: 12 }, (_, i) => text(16 + 4 * i, 20 + 4 * i));
+    if (HEIF_BRANDS.includes(major) || (['mif1', 'msf1'].includes(major) && compatible.some((c) => HEIF_BRANDS.includes(c)))) return 'heic';
+  }
+  if (text(0, 16) === 'FUJIFILMCCD-RAW ') return 'raw';
+  const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
+  if (TIFF_STARTS.includes(text(0, 4)) && rawExtensions.includes(ext)) return 'raw';
+  return null;
 }
+
+/** The browser can draw these; HEIC and RAW get a placeholder in the list. */
+export const previewable = (kind?: Kind) => kind === 'jpeg' || kind === 'png' || kind === 'webp';
 
 export function newEntries(files: File[]): Entry[] {
   return files.map((file) => ({
@@ -50,12 +78,17 @@ export function newEntries(files: File[]): Entry[] {
 }
 
 /** Checks format, size and duplicates (in the event and inside the selection) before sending. */
-export async function validate(eventId: string, entries: Entry[]): Promise<Entry[]> {
+export async function validate(eventId: string, entries: Entry[], rules: UploadRules): Promise<Entry[]> {
   const checked: Entry[] = [];
   for (const e of entries) {
-    if (!(await isJpeg(e.file))) checked.push({ ...e, status: 'invalid', message: REASONS.format });
-    else if (e.file.size > MAX_FILE_BYTES) checked.push({ ...e, status: 'invalid', message: REASONS.too_large });
-    else checked.push({ ...e, sha256: await sha256(e.file), status: 'valid' });
+    const kind = await detect(e.file, rules.raw_extensions);
+    if (!kind) checked.push({ ...e, status: 'invalid', message: REASONS.format });
+    else if (kind === 'raw' && !rules.raw_enabled) checked.push({ ...e, kind, status: 'invalid', message: REASONS.raw_disabled });
+    else if (kind === 'raw' && e.file.size > (rules.max_raw_bytes ?? 0)) {
+      checked.push({ ...e, kind, status: 'invalid',
+                     message: `O arquivo RAW ultrapassa o limite de ${Math.round((rules.max_raw_bytes ?? 0) / 1024 ** 2)} MB.` });
+    } else if (kind !== 'raw' && e.file.size > rules.max_photo_bytes) checked.push({ ...e, kind, status: 'invalid', message: REASONS.too_large });
+    else checked.push({ ...e, kind, sha256: await sha256(e.file), status: 'valid' });
   }
   const sums = checked.filter((e) => e.sha256).map((e) => e.sha256!);
   const { existing } = sums.length

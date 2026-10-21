@@ -9,11 +9,14 @@ import uuid
 from datetime import date
 
 import os
+from pathlib import Path
 
-import insightface.data
+import cv2
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
+
+FIXTURES = Path(__file__).parent / "fixtures"
 
 # Tests drive the queue step by step: no background thread.
 os.environ.setdefault("FOTOMAC_BACKGROUND_WORKER", "false")
@@ -77,9 +80,9 @@ def make_image(db, photographer):
 
 @pytest.fixture(scope="session")
 def group_photo_bgr():
-    """Sample group photo shipped INSIDE the insightface package ("t1.jpg").
+    """Apollo 11 crew portrait (3 faces), a public-domain NASA photo — see tests/fixtures/README.md.
 
     Deliberately not a CESMAC photo: the test suite must not carry personal data of event
     participants (LGPD Art. 6, III).
     """
-    return insightface.data.get_image("t1")
+    return cv2.imread(str(FIXTURES / "apollo11_crew.jpg"))

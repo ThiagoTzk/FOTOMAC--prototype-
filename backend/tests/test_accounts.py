@@ -139,6 +139,29 @@ def test_pending_first_and_link_can_be_resent(client, db, outbox):
     assert admin.post(f"/api/v1/admin/accounts/{pending_id}/activation-link").status_code == 400   # already active
 
 
+# TEMPORÁRIO — REMOVER JUNTO COM service.dev_activation_link.
+def test_dev_only_link_display_never_exists_when_emails_are_really_sent(client, db, outbox, monkeypatch):
+    from app.config import get_settings
+    admin = client(make_account(db))
+    pending_id = new_photographer(admin).json()["id"]
+    emailed = outbox.link()
+    monkeypatch.setattr(get_settings(), "email_sender", "outbox")      # development: e-mails become files
+    assert admin.get(f"/api/v1/admin/accounts/{pending_id}").json()["dev_link_available"] is True
+    url = admin.post(f"/api/v1/admin/accounts/{pending_id}/activation-link/dev").json()["url"]
+    shown = url.split("token=")[1]
+    anon = TestClient(app)
+    first = lambda t: anon.post("/api/v1/auth/first-access", json={"token": t, "password": PASSWORD, "password_confirmation": PASSWORD})
+    assert first(emailed).status_code == 400 and first(shown).status_code == 200   # single link alive at a time
+    assert db.scalar(select(m.AuditLog).where(m.AuditLog.action == "account.activation_link_shown_dev"))
+    assert admin.post(f"/api/v1/admin/accounts/{pending_id}/activation-link/dev").status_code == 400  # already active
+    monkeypatch.setattr(get_settings(), "email_sender", "smtp")        # CESMAC server: real e-mail
+    other = new_photographer(admin).json()
+    assert other["dev_link_available"] is False
+    assert admin.post(f"/api/v1/admin/accounts/{other['id']}/activation-link/dev").status_code == 404
+    photographer = client(make_account(db, "Moacir Barbosa", m.AccountRole.PHOTOGRAPHER))
+    assert photographer.post(f"/api/v1/admin/accounts/{other['id']}/activation-link/dev").status_code == 403
+
+
 # ----------------------------------------------------------------- edit and role (RF001 note 3)
 
 def test_role_change_is_logged_and_never_on_yourself(client, db):

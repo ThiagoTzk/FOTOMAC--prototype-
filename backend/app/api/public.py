@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import audit
+from app import audit, parameters
 from app.config import get_settings
 from app.db.models import Theme
 from app.db.session import get_session
@@ -22,6 +22,7 @@ from app.events import dates
 from app.events.service import EventError, NotFound
 from app.face.factory import get_face_engine
 from app.face.port import FaceEngine
+from app.images import watermark
 from app.images.processing import credit_line
 from app.notifications.factory import get_email_sender
 from app.notifications.port import EmailSender
@@ -44,7 +45,6 @@ def apply_limits(db: Session) -> None:
     """The administrator sets these numbers (RF026 "Limites de Requisição"); applied at startup
     and right after every change. (In-process limiters: with several API processes, each one
     keeps its own count — a shared store such as Redis would be the next step.)"""
-    from app import parameters
     search_limiter.max_requests = parameters.get(db, "searches_per_address")
     download_limiter.max_requests = parameters.get(db, "downloads_per_address")
 
@@ -52,6 +52,7 @@ def apply_limits(db: Session) -> None:
 class ThemeOut(BaseModel):
     id: int
     name: str
+    icon: str
 
 
 class PublicEvent(BaseModel):
@@ -73,7 +74,7 @@ def _out(db: Session, e) -> PublicEvent:
     return PublicEvent(id=e.id, name=e.name, date_label=dates.label(e.date_precision, e.date_start, e.date_end),
                        date_start=e.date_start, date_end=e.date_end, date_precision=e.date_precision.value,
                        location=e.location, description=e.description,
-                       themes=[ThemeOut(id=t.id, name=t.name) for t in sorted(e.themes, key=lambda t: t.name)],
+                       themes=[ThemeOut(id=t.id, name=t.name, icon=t.icon) for t in sorted(e.themes, key=lambda t: t.name)],
                        photos=service.published_count(db, e.id), credits=service.credits(db, e), expires_on=e.expires_on)
 
 
@@ -92,7 +93,7 @@ def _visit(request: Request, db: Session, event_id: uuid.UUID | None = None):
 
 @router.get("/themes", response_model=list[ThemeOut])
 def themes(db: Session = Depends(get_session)):
-    return [ThemeOut(id=t.id, name=t.name) for t in db.scalars(select(Theme).where(Theme.active.is_(True)).order_by(Theme.name))]
+    return [ThemeOut(id=t.id, name=t.name, icon=t.icon) for t in db.scalars(select(Theme).where(Theme.active.is_(True)).order_by(Theme.name))]
 
 
 @router.get("/events")
@@ -151,20 +152,39 @@ def _result_items(db: Session, ids: list[uuid.UUID]) -> list[ResultItem]:
             for i in ids if i in images and images[i].removal_requested_at is None]
 
 
-@router.post("/events/{event_id}/search", dependencies=[Depends(search_limiter)])
-async def search(event_id: uuid.UUID, request: Request, selfie: UploadFile = File(...), db: Session = Depends(get_session),
-                 engine: FaceEngine = Depends(get_face_engine)):
-    """Camera capture and gallery upload are treated IDENTICALLY (RF016 note 2)."""
+def _public_error(exc: service.PublicError) -> HTTPException:
+    code = status.HTTP_403_FORBIDDEN if exc.reason == "consent_required" else (
+        status.HTTP_429_TOO_MANY_REQUESTS if exc.reason == "limit" else status.HTTP_422_UNPROCESSABLE_ENTITY)
+    return HTTPException(code, {"message": str(exc), "reason": exc.reason})
+
+
+@router.post("/events/{event_id}/capture")
+def capture_challenge(event_id: uuid.UUID, request: Request, db: Session = Depends(get_session)):
+    """Starts a guided capture (RF036): the order of the head movements, drawn by the server."""
     event = _event(db, event_id)
-    data = await selfie.read(service.MAX_SELFIE_BYTES + 1)
     try:
-        matches = service.search(db, engine, _visit(request, db, event_id), event, data)
+        return {"order": service.issue_challenge(db, _visit(request, db, event_id), event)}
     except service.PublicError as exc:
-        code = status.HTTP_403_FORBIDDEN if exc.reason == "consent_required" else (
-            status.HTTP_429_TOO_MANY_REQUESTS if exc.reason == "limit" else status.HTTP_422_UNPROCESSABLE_ENTITY)
-        raise HTTPException(code, {"message": str(exc), "reason": exc.reason}) from None
+        raise _public_error(exc) from None
+
+
+@router.post("/events/{event_id}/search", dependencies=[Depends(search_limiter)])
+async def search(event_id: uuid.UUID, request: Request, frames: list[UploadFile] = File(...),
+                 steps: list[str] = Form(...), db: Session = Depends(get_session),
+                 engine: FaceEngine = Depends(get_face_engine)):
+    """Search from the frames of a guided capture, never from a single uploaded photo: the gallery
+    upload is gone (requirements v2.0, RF016 note 2) — only a live face passes the liveness check."""
+    event = _event(db, event_id)
+    if len(frames) > service.MAX_FRAMES:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, {"message": "A captura chegou incompleta. Grave de novo.",
+                                                                  "reason": "format"})
+    data = [await f.read(service.MAX_FRAME_BYTES + 1) for f in frames]
+    try:
+        matches = service.search(db, engine, _visit(request, db, event_id), event, data, steps)
+    except service.PublicError as exc:
+        raise _public_error(exc) from None
     finally:
-        del data  # the selfie bytes are dropped as soon as the search ends (RF016 note 4)
+        del data  # the frames are dropped as soon as the search ends (RF016 note 4)
     return {"items": _result_items(db, [m.image_id for m in matches])}
 
 
@@ -194,9 +214,10 @@ def download_link(image_id: uuid.UUID, request: Request, db: Session = Depends(g
 @router.get("/images/{image_id}/download")
 def download(image_id: uuid.UUID, request: Request, t: str | None = None, db: Session = Depends(get_session),
              storage: ObjectStorage = Depends(get_storage)):
-    """Delivers the ORIGINAL (credits in the metadata, no GPS, no recompression), one image per
-    operation. Served by the API itself: the storage address never reaches the browser — nor
-    the "Where from" that the browser writes into the downloaded file."""
+    """Delivers a copy of the photo in its original resolution, with the institutional watermark and
+    the credits and ownership notice in the metadata (RF019 notes 5, 6 and 9), no GPS — one image per
+    operation. The original in the collection is not changed. Served by the API itself: the storage
+    address never reaches the browser — nor the "Where from" that the browser writes into the file."""
     image = _allowed(request, db, image_id)
     if not service.valid_download_token(_visit(request, db), image_id, t):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Link de download expirado. Abra a foto e toque em “Baixar” de novo.")
@@ -204,7 +225,9 @@ def download(image_id: uuid.UUID, request: Request, t: str | None = None, db: Se
     db.commit()
     name = f"FOTOMAC - {image.event.name}.jpg".replace("/", "-").replace('"', "")
     disposition = f"attachment; filename=\"FOTOMAC.jpg\"; filename*=UTF-8''{quote(name)}"
-    return Response(storage.get(image.object_key), media_type="image/jpeg",
+    marked = watermark.apply(storage.get(image.object_key), image.credit_signature,
+                             int(parameters.get(db, "watermark_corner")))
+    return Response(marked, media_type="image/jpeg",
                     headers={"Content-Disposition": disposition, "Cache-Control": "no-store"})
 
 
@@ -236,21 +259,6 @@ def request_removal(image_id: uuid.UUID, body: RemovalIn, request: Request, db: 
         raise HTTPException(status.HTTP_400_BAD_REQUEST, {"message": str(exc), "reason": exc.reason}) from None
     except EventError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from None
-    return {"deadline": req.deadline_at.isoformat()}
-
-
-@router.post("/removal", dependencies=[Depends(removal_limiter)])
-async def request_removal_by_file(file: UploadFile = File(...), contact_email: str = Form(..., max_length=120),
-                                  reason: str | None = Form(None, max_length=500), db: Session = Depends(get_session),
-                                  sender: EmailSender = Depends(get_email_sender)):
-    """For anyone, with or without a search: identifies the image by the downloaded file itself."""
-    data = await file.read(service.MAX_SELFIE_BYTES * 3 + 1)
-    try:
-        req = service.request_removal_by_file(db, sender, data, contact_email, reason)
-    except service.PublicError as exc:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, {"message": str(exc), "reason": exc.reason}) from None
-    finally:
-        del data  # the file is used only to compute its checksum
     return {"deadline": req.deadline_at.isoformat()}
 
 

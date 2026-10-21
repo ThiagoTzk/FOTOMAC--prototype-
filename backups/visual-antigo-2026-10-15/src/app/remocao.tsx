@@ -28,7 +28,7 @@ export default function RemovalPage() {
   return (
     <ScrollView style={styles.page} contentContainerStyle={{ paddingBottom: 48 }}>
       <VisitorHeader back />
-      <Column style={{ gap: 20, marginTop: 24 }}>
+      <Column narrow style={{ gap: 20, marginTop: 24 }}>
         <View style={{ gap: 6 }}>
           <Text style={vtext.h1} accessibilityRole="header">Solicitar remoção de imagem</Text>
           <Text style={vtext.body}>

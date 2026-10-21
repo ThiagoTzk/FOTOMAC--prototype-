@@ -4,7 +4,8 @@
  */
 import { api, API_URL, ApiError } from './client';
 
-export type Theme = { id: number; name: string };
+/** icon: name of the symbol chosen for the theme (drawn by components/icons/themeIcons). */
+export type Theme = { id: number; name: string; icon: string };
 
 export type PublicEvent = {
   id: string;
@@ -58,10 +59,16 @@ export function endVisit() {
 }
 export const getPrivacy = () => api<{ retention: string; consent_version: string; controller: string; dpo: string | null }>('/public/privacy');
 
-/** Camera capture and gallery upload arrive here the same way (RF016 note 2). */
-export function searchFaces(eventId: string, selfie: Blob) {
+/** Starts a guided capture (RF036): the server draws the order of the head movements. */
+export const startCapture = (eventId: string) =>
+  api<{ order: ('esquerda' | 'direita' | 'cima' | 'baixo')[] }>(`/public/events/${eventId}/capture`, { method: 'POST' });
+
+/** The search from the frames of the guided capture — each tagged with the movement asked at that
+ *  moment. The video itself never leaves the device; there is no upload of a gallery photo (v2.0). */
+export function searchFaces(eventId: string, frames: Blob[], steps: string[]) {
   const form = new FormData();
-  form.append('selfie', selfie, 'autorretrato.jpg');
+  frames.forEach((f, n) => form.append('frames', f, `quadro-${n}.jpg`));
+  steps.forEach((s) => form.append('steps', s));
   return api<{ items: ResultItem[] }>(`/public/events/${eventId}/search`, { body: form });
 }
 
@@ -79,11 +86,3 @@ export async function downloadUrl(id: string) {
 
 export const requestRemoval = (imageId: string, contact_email: string, reason: string) =>
   api<{ deadline: string }>(`/public/images/${imageId}/removal`, { body: { contact_email, reason: reason || null } });
-
-export function requestRemovalByFile(file: Blob, contact_email: string, reason: string) {
-  const form = new FormData();
-  form.append('file', file, 'foto.jpg');
-  form.append('contact_email', contact_email);
-  if (reason) form.append('reason', reason);
-  return api<{ deadline: string }>('/public/removal', { body: form });
-}

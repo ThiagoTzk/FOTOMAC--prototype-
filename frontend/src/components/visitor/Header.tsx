@@ -10,7 +10,6 @@ import { Backdrop, Column } from './ui';
 
 const MENU = [
   { label: 'Política de Privacidade', href: '/privacidade' },
-  { label: 'Solicitar remoção de imagem', href: '/remocao' },
   { label: 'Acesso da equipe', href: '/login' },
 ] as const;
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Prepares the LOCAL development environment: PostgreSQL database + SeaweedFS credentials.
+# Prepares the LOCAL development environment: PostgreSQL database, SeaweedFS credentials and the
+# facial recognition model files (YuNet + SFace).
 # Idempotent: running it twice does not break anything and never overwrites existing secrets.
 #
 # Production (CESMAC server) does NOT use this script: there the DBA/infra team provides
@@ -24,10 +25,18 @@ FOTOMAC_S3_ENDPOINT=http://127.0.0.1:8333
 FOTOMAC_S3_ACCESS_KEY=${S3_KEY}
 FOTOMAC_S3_SECRET_KEY=${S3_SECRET}
 FOTOMAC_S3_BUCKET=fotomac-acervo
-FOTOMAC_FACE_ENGINE=insightface
+FOTOMAC_FACE_ENGINE=sface
+# Key of the pgcrypto encryption of the hired photographer's CPF and birth date (RF031). Keep it
+# outside the database and never change it while encrypted data exists (it could not be read back).
+FOTOMAC_IDENTITY_KEY=$(rand 48)
 EOF
   chmod 600 "$ENV_FILE"
   echo "Criado $ENV_FILE (permissão 600)."
+fi
+# Installations made before v2.0 have no identity key yet: add one, once.
+if ! grep -q '^FOTOMAC_IDENTITY_KEY=' "$ENV_FILE"; then
+  printf '# Key of the pgcrypto encryption of the hired photographer CPF / birth date (RF031).\nFOTOMAC_IDENTITY_KEY=%s\n' "$(rand 48)" >>"$ENV_FILE"
+  echo "Chave de criptografia da identificação acrescentada a $ENV_FILE."
 fi
 # shellcheck disable=SC1090
 set -a; source "$ENV_FILE"; set +a
@@ -70,3 +79,21 @@ cat >"$S3_CONFIG" <<EOF
 EOF
 chmod 600 "$S3_CONFIG"
 echo "SeaweedFS: credenciais gravadas em infra/seaweedfs/s3.json (permissão 600)."
+
+# 4. Facial recognition models (YuNet + SFace, official opencv_zoo files — the same ones measured in
+#    fotomac-lab's Test 1). Checked by SHA-256: a different file would produce vectors that do not
+#    compare with the stored ones, and the API refuses to load it anyway (app/face/sface_engine.py).
+MODELS="$ROOT/backend/models"
+ZOO="https://github.com/opencv/opencv_zoo/raw/main/models"
+mkdir -p "$MODELS"
+while read -r file folder sum; do
+  if [[ ! -f "$MODELS/$file" ]] || [[ "$(shasum -a 256 "$MODELS/$file" | cut -d' ' -f1)" != "$sum" ]]; then
+    curl -fsSL -o "$MODELS/$file.part" "$ZOO/$folder/$file"
+    [[ "$(shasum -a 256 "$MODELS/$file.part" | cut -d' ' -f1)" == "$sum" ]] || { echo "Checksum diferente: $file"; rm -f "$MODELS/$file.part"; exit 1; }
+    mv "$MODELS/$file.part" "$MODELS/$file"
+  fi
+done <<LIST
+face_detection_yunet_2023mar.onnx face_detection_yunet 8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4
+face_recognition_sface_2021dec.onnx face_recognition_sface 0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79
+LIST
+echo "Reconhecimento facial: modelos YuNet + SFace conferidos em backend/models/."
